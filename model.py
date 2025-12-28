@@ -180,7 +180,7 @@ class Transformer(nn.Module):
         ))
 
         self.lm_head = nn.Linear(config['n_embd'], config['vocab_size'], bias=False)
-        self.h_scale = 1/config(['n_embd']) # muP
+        self.h_scale = 1/config['n_embd'] # muP
         
         # weight-tying
         self.lm_head.weight = self.transformer.wte.weight
@@ -197,21 +197,19 @@ class Transformer(nn.Module):
 
 
     def _init_weights(self, module):
-        
+    
         if isinstance(module, nn.Linear):
+            if module.out_features == config['vocab_size']: # LM_head check
+                torch.nn.init.zeros_(module.weight) # MuP at all-zero LM head better stability
+            else:
+                # MuP std = 1 / sqrt(fan_in)
+                fan_in = module.weight.size(1)
+                std = 1.0 / math.sqrt(fan_in)
+                torch.nn.init.normal_(module.weight, mean=0.0, std=std)
 
-            fan_in = module.weight.size(1)
-            std = 1 / math.sqrt(fan_in) # MuP std
-
-            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
-            if module.bias is not None:
-                torch.nn.init.zeros_(module.bias)
-
-        elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02) # MuP only wants to keep input embd variance as a constant, so 0.02 is fine
-
-        if "lm_head" in str(module):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=1/config['n_embd']) # Lm head variance 1/d MuP
+        if isinstance(module, nn.Embedding):
+            # MuP for Embeddings, Constant variance std=0.02 is standard
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, targets=None):
         
@@ -284,7 +282,6 @@ class Transformer(nn.Module):
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
 
-
         # MuP, kept constant for Muon, didnt show much diff, maybe useful if you are extremely narrow
         # Also used as 1/(layer_mult) in AdamW, but the rule is only for RMSnorm in my code, so its basically useless
         # could try later, mostly not worth it
@@ -294,53 +291,55 @@ class Transformer(nn.Module):
         param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
 
         muon_groups = []
-        adam_decay = []
-        adam_nodecay = []
+        adam_groups = []
 
         for name, p in param_dict.items():
-            
             if p.dim() < 2:
-                if any(k in name for k in ["ln_f", "embed", "head"]): 
-                    # These are "Global" 1D params (start/end of model)
-                    p_lr = learning_rate 
-                else:
-                    # These are "Block" 1D params (RMSNorms inside layers)
-                    p_lr = learning_rate * depth_scale # depth_scale = 1/sqrt(L_mult)
+                
+                # Norms/Biases
+                is_global = any(k in name for k in ["ln_f", "embed", "head"])
+                p_lr = learning_rate if is_global else (learning_rate * depth_scale)
             
-                adam_nodecay.append({'params': [p], 'lr': p_lr})
+                adam_groups.append({
+                    'params': [p], 
+                    'lr': p_lr, 
+                    'weight_decay': 0.0
+                })
 
-            elif any(k in name for k in ["embed", "token", "wte", "wpe", "head", "output"]): # embds and heads get adamW
-                adam_decay.append(p)
+            elif any(k in name for k in ["embed", "token", "wte", "head", "output"]):
             
+                #  MuP rule constant LR
+                adam_groups.append({
+                    'params': [p], 
+                    'lr': learning_rate, 
+                    'weight_decay': weight_decay
+                })
+
             else:
-                # Update scaled = Update * sqrt(max(1, d_out/d_in))
-                # implement this by adjusting the LR for each param, dict for every group
+            
+                # MuP and Muon Spectral Scaling
                 dout, din = p.shape[0], p.shape[1]
                 spectral_scaling = math.sqrt(max(1, dout / din))
-        
-                # Combine tuned Muon LR * spectral_scale * depth_scale
+            
+                # Combine Muon base LR (5*LR) * spectral * depth
                 p_lr = (5 * learning_rate) * spectral_scaling * depth_scale
-        
+            
                 muon_groups.append({
                     'params': [p], 
                     'lr': p_lr, 
                     'weight_decay': weight_decay
                 })
 
-        optim_groups_adam = [
-            {'params': adam_decay, 'weight_decay': weight_decay},
-            {'params': adam_nodecay, 'weight_decay': 0.0}
-        ]
-        
+        # Prepare extra args (fused AdamW, etc)
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and device_type.startswith('cuda')
         extra_args = dict(fused=True) if use_fused else dict()
-        
-        optimizer_adam = torch.optim.AdamW(optim_groups_adam, lr=learning_rate, betas=betas, **extra_args)
-        optimizer_muon = torch.optim.Muon(muon_groups, lr=learning_rate, weight_decay=weight_decay)
+
+        optimizer_adam = torch.optim.AdamW(adam_groups, betas=betas, **extra_args)
+        optimizer_muon = torch.optim.Muon(muon_groups)
 
         return [optimizer_muon, optimizer_adam]
-
+    
     def estimate_mfu(self, fwdbwd_per_iter, dt): # completely need to change this function, its too old
         """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS """
         # first estimate the number of flops we do per iteration.

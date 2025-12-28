@@ -6,8 +6,6 @@ designed to be a high-throughput architecture
 
 Planned features:
 
- - Scaling configs (15M -> 1B)
- - MuP inits and scaling
  - HP sweeps, etc
  - 256K ctx, extendable to 1M (mini trained on 4096 ctx)
  - MLA or GQA, minimize the KV cache
@@ -22,7 +20,7 @@ Planned features:
  
 Completed:
 
- - scaling configs 
+ - scaling configs (0.08M test, 15M small, 1B big tbd)
  - MuP rules
  -  
 

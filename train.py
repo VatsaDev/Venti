@@ -20,6 +20,8 @@ from matplotlib import pyplot as plt
 import model
 from model import Transformer
 
+from datasets import load_dataset
+
 # TOML config 
 
 parser = argparse.ArgumentParser(description="conf")
@@ -107,6 +109,12 @@ matplotlib.rcParams['axes.labelcolor'] = 'grey'
 matplotlib.rcParams['xtick.color'] = 'grey' 
 matplotlib.rcParams['ytick.color'] = 'grey' 
 matplotlib.rcParams['legend.labelcolor'] = 'grey' 
+
+# hellaswag
+
+print("Loading HellaSwag for evaluation...")
+hswag = load_dataset("Rowan/hellaswag", split="validation", trust_remote_code=True)
+hellaswag_bpb_history = []
 
 # data Loading
 def _load_data_shard(file: Path):
@@ -234,7 +242,7 @@ else:
     compiled_model = m
     print("skipped compilation")
 
-# --- Loss Estimation ---
+# Loss Estimation
 @torch.no_grad()
 def estimate_loss(model_to_eval, data_gens):
     out = {}
@@ -249,6 +257,7 @@ def estimate_loss(model_to_eval, data_gens):
         out[split] = losses.mean().item()
     return out
 
+# text gen
 @torch.no_grad()
 def generate_text(model_to_gen, enc, max_new_tokens=1000, temperature=0.8, top_k=10):
     model_to_gen.eval() 
@@ -262,7 +271,58 @@ def generate_text(model_to_gen, enc, max_new_tokens=1000, temperature=0.8, top_k
     print(decode(generated_ids))
     model_to_gen.train()
 
-# --- Training Loop ---
+# hellaswag_bpb (move to evals.py later)
+
+@torch.no_grad()
+def evaluate_hellaswag_bpb(model_to_eval, dataset, num_samples=100):
+    model_to_eval.eval()
+    total_nll = 0.0
+    total_bytes = 0
+    
+    # We sample a subset to keep training moving fast
+    indices = random.sample(range(len(dataset)), num_samples)
+    
+    for idx in indices:
+        example = dataset[idx]
+        ctx_str = example['ctx']
+        label = int(example['label'])
+        correct_answer_str = example['endings'][label]
+        
+        ctx_enc = encode(ctx_str)
+        ans_enc = encode(correct_answer_str)
+        full_enc = ctx_enc + ans_enc
+        
+        if len(full_enc) > block_size:
+            full_enc = full_enc[-(block_size + 1):]
+        
+        x = torch.tensor(full_enc[:-1], dtype=torch.long, device=device)[None, ...]
+        y = torch.tensor(full_enc[1:], dtype=torch.long, device=device)[None, ...]
+        
+        with ctx:
+            # FIX: We pass Y as targets even if we don't use the model's internal loss.
+            # This forces the model to return the FULL sequence of logits.
+            logits, _ = model_to_eval(x, y) 
+            
+            ans_len = len(ans_enc)
+            
+            # Isolate the answer portion
+            ans_logits = logits[0, -ans_len:, :].contiguous()
+            ans_targets = y[0, -ans_len:].contiguous()
+            
+            # Safety check: if shapes still don't match, skip this sample
+            if ans_logits.size(0) != ans_targets.size(0):
+                continue
+                
+            nll = torch.nn.functional.cross_entropy(ans_logits, ans_targets, reduction='sum')
+            
+        total_nll += nll.item()
+        total_bytes += len(correct_answer_str.encode('utf-8'))
+
+    hswag_bpb = total_nll / (total_bytes * math.log(2)) if total_bytes > 0 else 0
+    model_to_eval.train()
+    return hswag_bpb
+
+# Training Loop
 time_s = time.time()
 prev_time = time_s 
 
@@ -274,6 +334,18 @@ for opt in [opt_adam, opt_muon]:
 
 opt_adam.zero_grad(set_to_none=True) 
 opt_muon.zero_grad(set_to_none=True)
+
+# bpb stuff
+
+sample_xb, _ = get_batch_from_shards('val', data_gens)
+
+# Decode them back to text to see how many UTF-8 bytes they actually represent
+sample_text = tok.decode(sample_xb[0].tolist(), skip_special_tokens=True)
+total_bytes = len(sample_text.encode('utf-8'))
+total_tokens = len(sample_xb[0])
+
+# Tokens per Byte ratio
+tokens_per_byte = total_tokens / total_bytes
 
 for iter_num in range(start_iter, max_iters + 1):
 
@@ -293,7 +365,18 @@ for iter_num in range(start_iter, max_iters + 1):
     # --- Evaluation ---
     if iter_num % eval_interval == 0 or iter_num == max_iters:
         losses = estimate_loss(m, data_gens)
+        
+        # loss
+        train_loss = losses['train']
         val_loss = losses['val']
+        
+        # perplexity
+        train_ppl = torch.exp(torch.tensor(train_loss)).item()
+        val_ppl = torch.exp(torch.tensor(val_loss)).item()
+
+        # bits/byte val loss (tokenizer invariant)
+        val_bpb = (val_loss/math.log(2)) * tokens_per_byte
+
         val_losses_history.append(val_loss)
         
         time_n = time.time()
@@ -302,7 +385,7 @@ for iter_num in range(start_iter, max_iters + 1):
         prev_time = time_n
         mfu = m.estimate_mfu(block_size * batch_size * grad_accum_steps, dt) if hasattr(m, 'estimate_mfu') else 0.0
 
-        print(f"step: {iter_num}, train loss: {losses['train']:.4f}, val loss: {val_loss:.4f}, lr: {lr_iter:.6f}, elapsed: {elapsed/60:.2f} min, MFU: {mfu*100:.2f}%")
+        print(f"step: {iter_num}, train loss: {losses['train']:.4f}, val loss: {val_loss:.4f}, train pplx: {train_ppl}, val pplx: {val_ppl}, val bpb: {val_bpb:.4f}, lr: {lr_iter:.6f}, elapsed: {elapsed/60:.2f} min, MFU: {mfu*100:.2f}%")
 
         if hasattr(m, 'generate'):
              generate_text(m, tok, max_new_tokens=200) 
@@ -393,5 +476,14 @@ for iter_num in range(start_iter, max_iters + 1):
 
         torch.save(fp16_state_dict, fp16_inference_path)
         print(f"Saved optimized inference model to {fp16_inference_path}")
+
+    # checking bench results at the same time as checkpoints makes sense
+    if iter_num % ckpt_iter == 0:
+        
+        hswag_bpb = evaluate_hellaswag_bpb(m, hswag, num_samples=100)
+        
+        print(f"--- Benchmark Results at Step {iter_num} ---")
+        print(f"HellaSwag BPB: {hswag_bpb:.4f}")
+
 
 print('Training finished.')
