@@ -6,7 +6,7 @@ designed to be a high-throughput architecture
 
 Planned features:
 
- - Scaling configs (16M -> 1B)
+ - Scaling configs (15M -> 1B)
  - MuP inits and scaling
  - HP sweeps, etc
  - 256K ctx, extendable to 1M (mini trained on 4096 ctx)
@@ -31,3 +31,13 @@ Inference comparision: (Qwen-3-VL 2b is just Qwen-3-VL 1.7b with the 300M vision
 (this is about generating 2048 tokens on N input len, on an H20)
 
 <img width="1135" height="883" alt="image" src="https://github.com/user-attachments/assets/a33ac1ae-f4a7-4ccf-89ea-ca14b3007cbd" />
+
+## baseline
+
+trained a 15M under the "baseline" commit, revert back to here for any baseline testing
+
+ - loss, also bits per byte
+ - perplexity
+ - flops used 
+ - BPB on zero shot hellaswag (looking for any upward rise)
+
