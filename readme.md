@@ -39,5 +39,4 @@ trained a 15M under the "baseline" commit, revert back to here for any baseline 
  - loss, also bits per byte
  - perplexity
  - flops used 
- - BPB on zero shot hellaswag (looking for any upward rise)
-
+ - BPB on zero shot hellaswag (looking for any upward rise) <br><br> <img width="752" height="124" alt="image" src="https://github.com/user-attachments/assets/757e2d87-80bb-4a3d-9977-ba8c3475bed3" />
