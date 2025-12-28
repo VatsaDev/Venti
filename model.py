@@ -105,10 +105,10 @@ class MHA(nn.Module):
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
             # flash_attn
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True, scale=(1.0 / k.size(-1))) # MuP 1/d scale, not 1/root(d)
         else:
             # manual implementation of attention
-            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            att = (q @ k.transpose(-2, -1)) * (1.0 / k.size(-1)) # MuP scaling
             att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
@@ -158,9 +158,11 @@ class Block(nn.Module):
         self.ln_2 = nn.RMSNorm(config['n_embd'])
         self.mlp = MLP()
 
+        self.branch_scale = 1.0 / math.sqrt(config['n_layer']) # MuP residual rule a/root(L), a = 1.0 here
+
     def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
+        x = x + self.branch_scale * self.attn(self.ln_1(x))
+        x = x + self.branch_scale * self.mlp(self.ln_2(x))
         return x
 
 class Transformer(nn.Module):
@@ -178,6 +180,7 @@ class Transformer(nn.Module):
         ))
 
         self.lm_head = nn.Linear(config['n_embd'], config['vocab_size'], bias=False)
+        self.h_scale = 1/config(['n_embd']) # muP
         
         # weight-tying
         self.lm_head.weight = self.transformer.wte.weight
@@ -194,12 +197,21 @@ class Transformer(nn.Module):
 
 
     def _init_weights(self, module):
+        
         if isinstance(module, nn.Linear):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+            fan_in = module.weight.size(1)
+            std = 1 / math.sqrt(fan_in) # MuP std
+
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
+
         elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02) # MuP only wants to keep input embd variance as a constant, so 0.02 is fine
+
+        if "lm_head" in str(module):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=1/config['n_embd']) # Lm head variance 1/d MuP
 
     def forward(self, idx, targets=None):
         
@@ -213,10 +225,11 @@ class Transformer(nn.Module):
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        
         x = self.transformer.drop(tok_emb + pos_emb)
+        
         for block in self.transformer.h:
             x = block(x)
-        #x = self.transformer.ln_f(x)
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
@@ -225,8 +238,11 @@ class Transformer(nn.Module):
         else:
             # inference-time mini-optimization: only forward final layer norm and lm_head on the very last position
             # Note: This optimization is not needed if using generate method below
-            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            logits = self.lm_head(x[:, [-1], :])  # note: using list [-1] to preserve the time dim
             loss = None
+
+        logits = logits * self.h_scale 
+        logits = 30.0 * torch.tanh(logits / 30.0) # softcap logits at 30, gemma style
 
         return logits, loss
 
@@ -245,7 +261,10 @@ class Transformer(nn.Module):
             logits, _ = self(idx_cond)
             
             # pluck the logits at the final step and scale by desired temperature
-            logits = logits[:, -1, :] / temperature
+            logits = logits[:, -1, :] 
+            logits = logits * self.h_scale 
+            logits = 30.0 * torch.tanh(logits / 30.0) # gemma softcap
+            logits = logits / temperature
             
             # optionally crop the logits to only the top k options
             if top_k is not None:
@@ -265,26 +284,48 @@ class Transformer(nn.Module):
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
 
+
+        # MuP, kept constant for Muon, didnt show much diff, maybe useful if you are extremely narrow
+        # Also used as 1/(layer_mult) in AdamW, but the rule is only for RMSnorm in my code, so its basically useless
+        # could try later, mostly not worth it
+
+        depth_scale = 1.0 # EDIT later, micro model is 16 deep, l_mult = depth_big/depth_small 
+
         param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
 
-        muon_params = []
+        muon_groups = []
         adam_decay = []
         adam_nodecay = []
 
         for name, p in param_dict.items():
             
             if p.dim() < 2:
-                adam_nodecay.append(p) # 1d params no_decay AdamW
+                if any(k in name for k in ["ln_f", "embed", "head"]): 
+                    # These are "Global" 1D params (start/end of model)
+                    p_lr = learning_rate 
+                else:
+                    # These are "Block" 1D params (RMSNorms inside layers)
+                    p_lr = learning_rate * depth_scale # depth_scale = 1/sqrt(L_mult)
             
+                adam_nodecay.append({'params': [p], 'lr': p_lr})
+
             elif any(k in name for k in ["embed", "token", "wte", "wpe", "head", "output"]): # embds and heads get adamW
                 adam_decay.append(p)
             
             else:
-                muon_params.append(p) # all 2d Muon
-
-        print(f"Muon Params: {len(muon_params)} tensors (Linear/Conv weights)")
-        print(f"AdamW Decay Params: {len(adam_decay)} tensors (Embeddings/Heads)")
-        print(f"AdamW No-Decay Params: {len(adam_nodecay)} tensors (Norms/Biases)")
+                # Update scaled = Update * sqrt(max(1, d_out/d_in))
+                # implement this by adjusting the LR for each param, dict for every group
+                dout, din = p.shape[0], p.shape[1]
+                spectral_scaling = math.sqrt(max(1, dout / din))
+        
+                # Combine tuned Muon LR * spectral_scale * depth_scale
+                p_lr = (5 * learning_rate) * spectral_scaling * depth_scale
+        
+                muon_groups.append({
+                    'params': [p], 
+                    'lr': p_lr, 
+                    'weight_decay': weight_decay
+                })
 
         optim_groups_adam = [
             {'params': adam_decay, 'weight_decay': weight_decay},
@@ -296,7 +337,7 @@ class Transformer(nn.Module):
         extra_args = dict(fused=True) if use_fused else dict()
         
         optimizer_adam = torch.optim.AdamW(optim_groups_adam, lr=learning_rate, betas=betas, **extra_args)
-        optimizer_muon = torch.optim.Muon(muon_params, lr = 5*learning_rate, weight_decay=weight_decay)
+        optimizer_muon = torch.optim.Muon(muon_groups, lr=learning_rate, weight_decay=weight_decay)
 
         return [optimizer_muon, optimizer_adam]
 
