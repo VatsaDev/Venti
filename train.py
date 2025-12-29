@@ -502,6 +502,6 @@ with open(summary_file, "a") as f:
         f.write("|--- |--- |--- |--- |--- |--- |\n")
     
     config_name = os.path.basename(conf_path)
-    f.write(f"| {config_name} | {run_name} | {final_val_loss:.4f} | {final_val_ppl:.2f} | {p/1e6:.2f}M |\n")
+    f.write(f"| {config_name} | {run_name} | {final_val_loss:.4f} | {final_val_ppl:.2f} | {final_val_bpb:.4f} |\n")
 
 print(f"Results appended to {summary_file}")
