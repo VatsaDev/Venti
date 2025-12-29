@@ -32,3 +32,13 @@
 | config_34.toml | TWKBV2 | 4.7933 | 120.69 | 1.8202 |
 | config_35.toml | nq7jbe | 4.8984 | 134.07 | 1.8601 |
 | config_36.toml | DAPTdz | 4.8999 | 134.28 | 1.8607 |
+| config_37.toml | JRdMDt | 4.8970 | 133.89 | 1.8596 |
+| config_38.toml | sqjJ8L | 4.9071 | 135.25 | 1.8635 |
+| config_39.toml | 39buq3 | 4.8961 | 133.77 | 1.8593 |
+| config_4.toml | 9Ssz2f | 4.5422 | 93.90 | 1.7249 |
+| config_40.toml | QJveWU | 4.8633 | 129.45 | 1.8468 |
+| config_41.toml | DFmpIV | 4.8593 | 128.94 | 1.8453 |
+| config_42.toml | Oonjfw | 4.8519 | 127.98 | 1.8425 |
+| config_43.toml | EgDXlN | 4.8700 | 130.31 | 1.8494 |
+| config_44.toml | 0H8uTT | 4.8741 | 130.86 | 1.8510 |
+
