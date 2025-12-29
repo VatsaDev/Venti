@@ -47,7 +47,7 @@ warmup_iters = data["warmup_iters"]
 
 beta1 = 0.9
 beta2 = 0.95
-weight_decay = 0.05
+weight_decay = data["weight_decay"]
 
 max_grad_norm = 1.0 
 
@@ -56,7 +56,7 @@ ckpt_iter = 500
 resume = False
 resume_checkpoint = "/content/floppyLLM/checkpoints/sVtcrs_10000.pt" 
 
-data_dir = "synth"
+data_dir = data["data_dir"]
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 ptdtype = torch.float16
@@ -90,6 +90,7 @@ model.config["n_layer"] = data["n_layer"]
 model.config["n_head"] = data["n_head"]
 model.config["ctx_len"] = block_size
 model.config["vocab_size"] = vocab_size
+model.config["dropout"] = data["dropout"]
 
 # nice wandb styles
 plt.style.use('default') 
@@ -487,3 +488,20 @@ for iter_num in range(start_iter, max_iters + 1):
 
 
 print('Training finished.')
+
+final_val_loss = val_losses_history[-1] if val_losses_history else 0
+final_val_ppl = math.exp(final_val_loss)
+final_val_bpb = (final_val_loss/math.log(2)) * tokens_per_byte
+
+summary_file = "sweep_results.md"
+file_exists = os.path.isfile(summary_file)
+
+with open(summary_file, "a") as f:
+    if not file_exists or os.path.getsize(summary_file) == 0:
+        f.write("| Config Path | Run ID | Val Loss | Val PPL | Val BPB |\n")
+        f.write("|--- |--- |--- |--- |--- |--- |\n")
+    
+    config_name = os.path.basename(conf_path)
+    f.write(f"| {config_name} | {run_name} | {final_val_loss:.4f} | {final_val_ppl:.2f} | {p/1e6:.2f}M |\n")
+
+print(f"Results appended to {summary_file}")
