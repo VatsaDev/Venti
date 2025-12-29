@@ -41,4 +41,26 @@
 | config_42.toml | Oonjfw | 4.8519 | 127.98 | 1.8425 |
 | config_43.toml | EgDXlN | 4.8700 | 130.31 | 1.8494 |
 | config_44.toml | 0H8uTT | 4.8741 | 130.86 | 1.8510 |
+| config_45.toml | cQoxWb | 4.9249 | 137.68 | 1.8702 |
+| config_46.toml | B78bR4 | 4.9183 | 136.77 | 1.8677 |
+| config_47.toml | BHvYLD | 4.8977 | 133.98 | 1.8599 |
+| config_48.toml | qyCiPV | 4.9155 | 136.39 | 1.8667 |
+| config_49.toml | XNXu2Q | 4.9202 | 137.03 | 1.8684 |
+| config_5.toml | zjsNIV | 4.6036 | 99.85 | 1.7482 |
+| config_50.toml | SIypm3 | 4.9562 | 142.05 | 1.8821 |
+| config_51.toml | RQbIVX | 4.9568 | 142.14 | 1.8824 |
+| config_52.toml | IX05Pj | 4.9547 | 141.85 | 1.8816 |
+| config_53.toml | pnrS4J | 4.9580 | 142.31 | 1.8828 |
+| config_54.toml | c5rBy5 | 4.9645 | 143.24 | 1.8853 |
+| config_55.toml | HKzSuT | 5.0630 | 158.06 | 1.9227 |
+| config_56.toml | jQBs1U | 5.0483 | 155.75 | 1.9171 |
+| config_57.toml | 6abSBf | 5.0574 | 157.17 | 1.9205 |
+| config_58.toml | AEhNVb | 5.0469 | 155.54 | 1.9166 |
+| config_59.toml | JOQF3s | 5.0707 | 159.28 | 1.9256 |
+| config_6.toml | DOl9tj | 4.6545 | 105.05 | 1.7675 |
+| config_60.toml | 897kyu | 5.0287 | 152.74 | 1.9097 |
+| config_61.toml | AsRjr5 | 5.0241 | 152.03 | 1.9079 |
+| config_62.toml | pk3EZc | 5.0168 | 150.93 | 1.9051 |
+| config_63.toml | ahPgs1 | 5.0190 | 151.26 | 1.9060 |
+| config_64.toml | fkEsxc | 5.0286 | 152.72 | 1.9096 |
 
