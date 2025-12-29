@@ -20,4 +20,15 @@
 | config_23.toml | 3H9Ccn | 4.6507 | 104.66 | 0.74M |
 | config_24.toml | oJb7U5 | 4.6683 | 106.51 | 0.74M |
 | config_25.toml | ACO0sT | 4.7460 | 115.12 | 0.74M |
-
+| config_26.toml | X0r3To | 4.7442 | 114.91 | 1.8016 |
+| config_27.toml | gHC1Hn | 4.7495 | 115.53 | 1.8036 |
+| config_28.toml | uW5T2s | 4.7429 | 114.77 | 1.8011 |
+| config_29.toml | iyOIO7 | 4.7566 | 116.35 | 1.8063 |
+| config_3.toml | g30U4M | 4.5721 | 96.74 | 1.7362 |
+| config_30.toml | 2vJJGn | 4.7934 | 120.71 | 1.8203 |
+| config_31.toml | fYDOtP | 4.8069 | 122.35 | 1.8254 |
+| config_32.toml | 4F0EjM | 4.8105 | 122.80 | 1.8268 |
+| config_33.toml | Q2jw6X | 4.8079 | 122.47 | 1.8258 |
+| config_34.toml | TWKBV2 | 4.7933 | 120.69 | 1.8202 |
+| config_35.toml | nq7jbe | 4.8984 | 134.07 | 1.8601 |
+| config_36.toml | DAPTdz | 4.8999 | 134.28 | 1.8607 |
