@@ -63,4 +63,22 @@
 | config_62.toml | pk3EZc | 5.0168 | 150.93 | 1.9051 |
 | config_63.toml | ahPgs1 | 5.0190 | 151.26 | 1.9060 |
 | config_64.toml | fkEsxc | 5.0286 | 152.72 | 1.9096 |
+| config_65.toml | 7anG92 | 5.0688 | 158.99 | 1.9249 |
+| config_66.toml | yxqlNU | 5.0584 | 157.34 | 1.9209 |
+| config_67.toml | aB1pMF | 5.0531 | 156.51 | 1.9189 |
+| config_68.toml | zYGLln | 5.0596 | 157.52 | 1.9214 |
+| config_69.toml | aParZJ | 5.0735 | 159.74 | 1.9267 |
+| config_7.toml | oxA2zm | 4.6350 | 103.03 | 1.7601 |
+| config_70.toml | KSOk2G | 5.1192 | 167.20 | 1.9440 |
+| config_71.toml | iWhOqo | 5.1146 | 166.43 | 1.9423 |
+| config_72.toml | E6mf8Z | 5.1146 | 166.44 | 1.9423 |
+| config_73.toml | PQLFWN | 5.1139 | 166.31 | 1.9420 |
+| config_74.toml | Zd164h | 5.1129 | 166.15 | 1.9416 |
+| config_75.toml | 2Ybdg2 | 5.2359 | 187.90 | 1.9883 |
+| config_76.toml | 0p7vRB | 5.2148 | 183.97 | 1.9803 |
+| config_77.toml | kfwSyC | 5.2175 | 184.46 | 1.9813 |
+| config_78.toml | 4vsQhu | 5.2204 | 185.01 | 1.9824 |
+| config_79.toml | H9gI7M | 5.2253 | 185.91 | 1.9843 |
+| config_8.toml | bb02DV | 4.6405 | 103.59 | 1.7622 |
+| config_9.toml | nqmQM2 | 4.6303 | 102.54 | 1.7583 |
 

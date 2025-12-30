@@ -4,7 +4,7 @@ import os
 import subprocess
 import glob
 
-lr = [1e-3, 8e-4, 5e-4, 3e-4]
+lr = [3e-3, 2e-3, 1e-3, 9e-4, 8e-4, 7e-4, 6e-4, 5e-4, 4e-4, 3e-4]
 dropout = [0.0, 0.05, 0.1, 0.2]
 weight_decay = [0.1, 0.01, 0.02, 0.05, 0.1]
 
@@ -50,13 +50,13 @@ for l in lr:
                 eval_iters = 20
                 warmup_iters = 200 
 
-                dropout = {d}
-                weight_decay = {w}
+                dropout = 0.0
+                weight_decay = 0.01
 
                 data_dir = "synth"
                 """
             
-            path = os.path.join(sweeps_folder, f"config_{c}.toml")
+            path = os.path.join(sweeps_folder, f"config_{c}_lr.toml")
             with open(path, "w") as f:
                 f.write(toml_base)
             c += 1
