@@ -31,8 +31,8 @@ def get_finished_configs():
 
 c = 0
 for l in lr:
-    for d in dropout:
-        for w in weight_decay:
+    #for d in dropout:
+    #for w in weight_decay:
             toml_base = f"""
                 n_embd = 64
                 n_layer = 4
