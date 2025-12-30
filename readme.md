@@ -19,7 +19,7 @@ Planned features:
  
 Completed:
 
- - scaling configs (0.08M test, 15M small, 1B big tbd)
+ - scaling configs (0.08M test, 15M small, 1B big)
  - MuP rules
  - HP sweeps 
 
