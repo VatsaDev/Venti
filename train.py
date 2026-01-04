@@ -132,46 +132,57 @@ def _load_data_shard(file: Path):
         assert nbytes_read == expected_bytes, f"read mismatch in {file}"
     return tokens
 
-def create_data_generator(filename_pattern: str, batch_size: int, block_size: int, rank : int = 0, world_size : int = 1):
+def create_data_generator(filename_pattern: str, batch_size: int, block_size: int, rank: int = 0, world_size: int = 1):
     files = sorted(glob.glob(filename_pattern))
-    if not files: raise FileNotFoundError(f"No data files found: {filename_pattern}")
+    if not files: 
+        raise FileNotFoundError(f"No data files found: {filename_pattern}")
+    
     print(f"Found {len(files)} data shards for pattern {filename_pattern}")
     file_iter = itertools.cycle([Path(file) for file in files])
+    
+    # Pre-calculate token counts
     local_batch_size = batch_size // world_size
+    tokens_per_rank = local_batch_size * block_size
+    global_tokens_per_step = batch_size * block_size
+    
     current_tokens = None
     current_pos = 0
 
     while True:
-        if current_tokens is None or current_pos + block_size * local_batch_size * world_size + 1 > len(current_tokens):
+        # Check if current shard has enough tokens for the WHOLE global batch
+        if current_tokens is None or current_pos + global_tokens_per_step + 1 > len(current_tokens):
             next_file = next(file_iter)
             current_tokens = _load_data_shard(next_file)
-            current_tokens = current_tokens.to(torch.int64) # Keep on CPU
+            current_tokens = current_tokens.to(torch.int64) # Keep on CPU for faster slicing
             current_pos = 0
-            if len(current_tokens) <= block_size + 1:
-                 current_tokens = None 
-                 continue 
+            
+            # Ensure the shard is actually big enough to hold one batch
+            if len(current_tokens) <= global_tokens_per_step + 1:
+                current_tokens = None 
+                continue 
 
-        rank_start_offset = current_pos + rank * local_batch_size * block_size
-        batch_x, batch_y = [], []
-        for i in range(local_batch_size):
-             start_idx = rank_start_offset + i * block_size
-             end_idx = start_idx + block_size
-             if end_idx + 1 > len(current_tokens):
-                 current_tokens = None 
-                 break 
-             x = current_tokens[start_idx : end_idx]
-             y = current_tokens[start_idx + 1 : end_idx + 1]
-             batch_x.append(x)
-             batch_y.append(y)
-        if current_tokens is None: continue 
+        # --- THE FAST PART: CONTIGUOUS SLICING ---
+        # 1. Calculate the window for THIS specific rank
+        start_idx = current_pos + (rank * tokens_per_rank)
+        end_idx = start_idx + tokens_per_rank + 1 # +1 for the target shift
+        
+        # 2. Slice once. This is a single C++ call.
+        # This gives us (local_batch_size * block_size + 1) tokens
+        chunk = current_tokens[start_idx : end_idx]
+        
+        # 3. Create X and Y using .view(). 
+        # This is a "metadata-only" operation (zero memory copy).
+        # x: [token_0, token_1, ..., token_N-1]
+        # y: [token_1, token_2, ..., token_N]
+        x = chunk[:-1].view(local_batch_size, block_size)
+        y = chunk[1:].view(local_batch_size, block_size)
 
-        inputs = torch.stack(batch_x)
-        targets = torch.stack(batch_y)
-        # Pin memory helps with speed, but non_blocking=True is key
-        inputs = inputs.to(device=device, non_blocking=True)
-        targets = targets.to(device=device, non_blocking=True)
-        current_pos += batch_size * block_size
-        yield inputs, targets
+        # 4. Move to GPU in bulk.
+        # Pin memory and non_blocking=True allow the GPU to copy while the CPU works.
+        yield x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+
+        # Advance the pointer by the GLOBAL batch tokens consumed
+        current_pos += global_tokens_per_step
 
 train_data_pattern = os.path.join("data", data_dir, f"{data_dir}_train_*.bin")
 val_data_pattern = os.path.join("data", data_dir, f"{data_dir}_val_*.bin")
@@ -230,9 +241,8 @@ print(f"{p/1e6:.2f} M parameters")
 # --- Compile ---
 print("compilation step")
 if device == "cuda":
-    # T4 supports compilation via Triton, though slightly less optimized than Ampere.
-    # We keep it as it usually provides a speedup.
-    compiled_model = torch.compile(m)
+    # trying reduce-overhead to see if cuda graphs fix perf
+    compiled_model = torch.compile(m, mode="reduce-overhead")
     print("compiled")
 else:
     compiled_model = m
