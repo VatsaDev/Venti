@@ -1,8 +1,9 @@
 import math 
 import torch
+import inspect
 import torch.nn as nn
 from torch.nn import functional as F
-import inspect
+from torch.nn.attention.flex_attention import flex_attention as flex_attn
 
 config = {
     "n_embd": 128,         
@@ -107,16 +108,31 @@ class MHA(nn.Module):
         
         # qk norm
         q = self.q_norm(q)
-        k = self.k_norm(k)
+        k = self.k_norm(k) 
 
         # qk rope
         q = self.rope(q) 
         k = self.rope(k)
 
+        # norm forced a higher dtype, set back to fp16 all to fulfill flex_attn 
+
+        q = q.to(v.dtype)
+        k = k.to(v.dtype)
+
+        # score mod for flex attn 
+
+        def noop(score, b, h, q_idx, kv_idx):
+            return score
+
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
+
         if self.flash:
+
+            y = flex_attn(q, k, v, score_mod=noop, scale=(1.0 / k.size(-1)))
+            
             # flash_attn
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True, scale=(1.0 / k.size(-1))) # MuP 1/d scale, not 1/root(d)
+            #y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True, scale=(1.0 / k.size(-1))) # MuP 1/d scale, not 1/root(d)
+        
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / k.size(-1)) # MuP scaling
@@ -164,15 +180,15 @@ class Block(nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.ln_1 = RMSNorm(config['n_embd'])
+        self.rm_1 = RMSNorm(config['n_embd'])
         self.attn = MHA()
-        self.ln_2 = RMSNorm(config['n_embd'])
+        self.rm_2 = RMSNorm(config['n_embd'])
         self.mlp = MLP()
 
         self.branch_scale = 1.0 / math.sqrt(config['n_layer']) # MuP residual rule a/root(L), a = 1.0 here
 
     def forward(self, x):
-        x = x + self.branch_scale * self.attn(self.ln_1(x)) + self.branch_scale * self.mlp(self.ln_2(x)) # supposedly a small throughput boost post compile
+        x = x + self.branch_scale * self.attn(self.rm_1(x)) + self.branch_scale * self.mlp(self.rm_2(x)) # supposedly a small throughput boost post compile
         return x
 
 class Transformer(nn.Module):

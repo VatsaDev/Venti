@@ -24,6 +24,14 @@ from model import Transformer
 
 from datasets import load_dataset
 
+import torch._inductor.config as config
+
+# like reduce-overhead without the baggage
+
+config.coordinate_descent_tuning = True
+config.triton.unique_kernel_names = True
+config.fx_graph_cache = True
+
 # TOML config 
 
 parser = argparse.ArgumentParser(description="conf")
@@ -353,15 +361,6 @@ total_tokens = len(sample_xb[0])
 # Tokens per Byte ratio
 tokens_per_byte = total_tokens / total_bytes
 
-# fixing the rmsnorm fp16 vs fp32 issue
-
-# Force all model parameters to half EXCEPT the ones Muon/Adam need in FP32 
-# need the internal RMSNorm weights to be FP16 for the kernels.
-
-for name, p in m.named_parameters():
-    if "norm" in name.lower():
-        p.data = p.data.to(torch.float16)
-
 for iter_num in range(start_iter, max_iters + 1):
 
     # cos lr schedule 
@@ -501,4 +500,3 @@ for iter_num in range(start_iter, max_iters + 1):
             generate_text(m, tok, max_new_tokens=200)
 
 print('Training finished.')
-
