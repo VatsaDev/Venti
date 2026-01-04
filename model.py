@@ -16,39 +16,37 @@ config = {
 
 class RoPE(nn.Module):
 
-    def __init__(self, d_head): # rope changes qk after it is split by attn heads
+    def __init__(self, d_head):
         super().__init__()
-
-        self.dim = d_head 
+        self.d_head = d_head
         self.ctx = config['ctx_len']
 
-        # pre-compute the theta values and store them
-
-        theta = 1000000.0 ** (-2.0 * torch.arange(0, self.dim, 2).float() / self.dim)
+        # Precompute cos and sin instead of complex numbers
+        inv_freq = 1.0 / (1000000.0 ** (torch.arange(0, d_head, 2).float() / d_head))
         t = torch.arange(self.ctx, dtype=torch.float)
+        freqs = torch.einsum("i,j->ij", t, inv_freq) # (ctx, d_head/2)
 
-        # shapes t -> (ctx_len, 1), theta -> (1, dim/2) broadcast (ctx_len, dim/2)
-        freqs = t.unsqueeze(1) * theta.unsqueeze(0)
+        # We repeat the frequencies so they match the full d_head
+        emb = torch.cat((freqs, freqs), dim=-1) # (ctx, d_head)
+        
+        self.register_buffer('cos', emb.cos().view(1, 1, self.ctx, d_head))
+        self.register_buffer('sin', emb.sin().view(1, 1, self.ctx, d_head))
 
-        # complex number trick, (cos th + i * sin th)
-        freq_cis = torch.polar(torch.ones_like(freqs), freqs)
-
-        self.register_buffer('freq_cis', freq_cis)
+    def rotate_half(self, x):
+        """Rotates half the hidden dims of the input."""
+        x1 = x[..., : x.shape[-1] // 2]
+        x2 = x[..., x.shape[-1] // 2 :]
+        return torch.cat((-x2, x1), dim=-1)
 
     def forward(self, x):
-
-        B, nh, T, hs = x.shape # input is B, nh, T, hs
-
-        x_complex = torch.view_as_complex(x.float().reshape(B, nh, T, hs//2, 2)) # split into 2 groups 
-
-        freq_cis = self.freq_cis[:T].view(1, 1, T, -1)
-
-        x_rot_complex = x_complex * freq_cis
-
-        x_rot = torch.view_as_real(x_rot_complex)
-        x_out = x_rot.reshape(B, nh, T, hs)
-
-        return x_out.type_as(x)
+        # x shape: (B, nh, T, hs)
+        T = x.size(2)
+        cos = self.cos[:, :, :T, :]
+        sin = self.sin[:, :, :T, :]
+        
+        # This is the real-valued equivalent of complex multiplication:
+        # (x * cos) + (rotate_half(x) * sin)
+        return (x * cos) + (self.rotate_half(x) * sin)
 
 class MHA(nn.Module):
 
@@ -83,6 +81,8 @@ class MHA(nn.Module):
             # causal mask to ensure that attention is only applied to the left in the input sequence
             self.register_buffer("bias", torch.tril(torch.ones(self.block_size, self.block_size))
                                         .view(1, 1, self.block_size, self.block_size))
+
+        # KV cache (tbd)
 
     def forward(self, x):
         B, T, C = x.size() # bs, ctx_len, n_embd
