@@ -24,7 +24,7 @@ class RoPE(nn.Module):
 
         # pre-compute the theta values and store them
 
-        theta = 10000.0 ** (-2.0 * torch.arange(0, self.dim, 2).float() / self.dim)
+        theta = 1000000.0 ** (-2.0 * torch.arange(0, self.dim, 2).float() / self.dim)
         t = torch.arange(self.ctx, dtype=torch.float)
 
         # shapes t -> (ctx_len, 1), theta -> (1, dim/2) broadcast (ctx_len, dim/2)
@@ -161,8 +161,7 @@ class Block(nn.Module):
         self.branch_scale = 1.0 / math.sqrt(config['n_layer']) # MuP residual rule a/root(L), a = 1.0 here
 
     def forward(self, x):
-        x = x + self.branch_scale * self.attn(self.ln_1(x))
-        x = x + self.branch_scale * self.mlp(self.ln_2(x))
+        x = x + self.branch_scale * self.attn(self.ln_1(x)) + self.branch_scale * self.mlp(self.ln_2(x)) # supposedly a small throughput boost post compile
         return x
 
 class Transformer(nn.Module):
