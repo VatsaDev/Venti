@@ -104,6 +104,17 @@ logging = duckdb.connect("log.db")
 logging.sql(table_format)
 logging.close()
 
+def safe_log_to_duckdb(run_name, row_data, db_path="log.db", retries=5):
+    for i in range(retries):
+        try:
+            with duckdb.connect(db_path) as con:
+                con.execute(f'INSERT INTO "_{run_name}" VALUES {row_data}')
+            return # Success!
+        except duckdb.duckdb.IOException:
+            # Database is locked by the plotter, wait 0.5s and retry
+            time.sleep(0.5)
+    print("WARNING: Could not write to log.db after 5 retries. Skipping log.")
+
 # encoding 
 tok = AutoTokenizer.from_pretrained("tokenizers/venti_4k")
 encode = lambda s: tok.encode(s, add_special_tokens=True)
@@ -412,9 +423,7 @@ for iter_num in range(start_iter, max_iters + 1):
         VALUES ({iter_num},{lr_iter},{train_loss:.4f},{val_loss:.4f},{train_ppl:.4f},{val_ppl:.4f},{val_bpb:.4f},{throughput:.4f});
         """
 
-        with duckdb.connect("log.db") as con:
-            con.execute(row_add)
-        con.close() 
+        safe_log_to_duckdb(run_name, row_add)
 
         subprocess.Popen(["python", "plotgen.py", f"_{run_name}"]) 
          
