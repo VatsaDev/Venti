@@ -128,6 +128,7 @@ model.config["n_head"] = data["n_head"]
 model.config["ctx_len"] = block_size
 model.config["vocab_size"] = vocab_size
 model.config["dropout"] = data["dropout"]
+model.config["swa_ratio"] = data["swa_ratio"]
 
 # hellaswag
 
@@ -256,6 +257,9 @@ else:
 
 p = sum(p.numel() for p in m.parameters() if p.requires_grad)
 print(f"{p/1e6:.2f} M parameters")
+
+# tag layers for attn 
+m._tag_layers(m)
 
 # --- Compile ---
 print("compilation step")
@@ -419,9 +423,7 @@ for iter_num in range(start_iter, max_iters + 1):
         print(f"step: {iter_num}, train loss: {losses['train']:.4f}, val loss: {val_loss:.4f}, train pplx: {train_ppl:.4f}, val pplx: {val_ppl:.4f}, val bpb: {val_bpb:.4f}, lr: {lr_iter:.6f}, elapsed: {elapsed/60:.2f} min, MFU: {mfu*100:.2f}%, throughput: {throughput:.2f} tok/s, tflops: {tflops:.2f}")
 
         # everything to duckdb 
-        row_add = f"""INSERT INTO "_{run_name}"
-        VALUES ({iter_num},{lr_iter},{train_loss:.4f},{val_loss:.4f},{train_ppl:.4f},{val_ppl:.4f},{val_bpb:.4f},{throughput:.4f});
-        """
+        row_add = f"""({iter_num},{lr_iter},{train_loss:.4f},{val_loss:.4f},{train_ppl:.4f},{val_ppl:.4f},{val_bpb:.4f},{throughput:.4f})"""
 
         safe_log_to_duckdb(run_name, row_add)
 

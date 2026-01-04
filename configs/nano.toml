@@ -1,7 +1,7 @@
 # literally just a code test
 
 n_embd = 16 # MuP minimum
-n_layer = 2
+n_layer = 4
 n_head = 2
 
 batch_size = 1
@@ -18,5 +18,7 @@ warmup_iters = 200
 
 dropout = 0.05
 weight_decay = 0.05
+
+swa_ratio = 4 # every 4th layer is global 
 
 data_dir = "synth"

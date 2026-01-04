@@ -4,8 +4,8 @@ n_embd = 256 # MuP minimum
 n_layer = 16
 n_head = 2
 
-batch_size = 4
-block_size = 2048 # ctx_len
+batch_size = 8
+block_size = 4096 # ctx_len
 eval_interval = 20
 grad_accum_steps = 4 # basically microbatch
 
@@ -18,6 +18,8 @@ warmup_iters = 200
 
 dropout = 0.0
 weight_decay = 0.01
+
+swa_ratio = 4 # every 4th layer is global
 
 data_dir = "synth"
 

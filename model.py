@@ -3,7 +3,7 @@ import torch
 import inspect
 import torch.nn as nn
 from torch.nn import functional as F
-from torch.nn.attention.flex_attention import flex_attention as flex_attn
+from torch.nn.functional import scaled_dot_product_attention as flash_attn
 
 config = {
     "n_embd": 128,         
@@ -11,7 +11,8 @@ config = {
     "n_layer": 5,         
     "dropout": 0.05,         
     "vocab_size": 50257,
-    "ctx_len": 1024, 
+    "ctx_len": 1024,
+    "swa_ratio": 4, # 3/4 layers swa, every 4th layer is global
     "bias": False,           
 }
 
@@ -86,6 +87,11 @@ class MHA(nn.Module):
         # rope
 
         self.rope = RoPE(self.n_embd//self.n_head)
+        
+        window = 128
+        size = config['block_size']
+        mask = torch.ones(size, size).tril().triu(diagonal=-window).to(torch.bool)
+        self.register_buffer("swa_mask", mask.view(1, 1, size, size))
 
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if not self.flash:
@@ -93,6 +99,8 @@ class MHA(nn.Module):
             # causal mask to ensure that attention is only applied to the left in the input sequence
             self.register_buffer("bias", torch.tril(torch.ones(self.block_size, self.block_size))
                                         .view(1, 1, self.block_size, self.block_size))
+
+        self.register_buffer('layer_idx', torch.tensor(-1))
 
         # KV cache (tbd)
 
@@ -119,20 +127,20 @@ class MHA(nn.Module):
         q = q.to(v.dtype)
         k = k.to(v.dtype)
 
-        # score mod for flex attn 
-
-        def noop(score, b, h, q_idx, kv_idx):
-            return score
-
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
 
-        if self.flash:
+        mask = self.swa_mask[:, :, :T, :T]
 
-            y = flex_attn(q, k, v, score_mod=noop, scale=(1.0 / k.size(-1)))
-            
-            # flash_attn
-            #y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True, scale=(1.0 / k.size(-1))) # MuP 1/d scale, not 1/root(d)
-        
+        if self.flash:            
+
+            # MuP 1/d scale, not 1/root(d)
+            # 3/4 layers are now SWA
+
+            if self.layer_idx.item() % config["swa_ratio"] == 0:
+                y = flash_attn(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True, scale=(1.0 / k.size(-1)))
+            else:
+                y = flash_attn(q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0, is_causal=False, scale=(1.0 / k.size(-1)))
+                     
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / k.size(-1)) # MuP scaling
@@ -233,6 +241,11 @@ class Transformer(nn.Module):
         if isinstance(module, nn.Embedding):
             # MuP for Embeddings, Constant variance std=0.02 is standard
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def _tag_layers(self, model):
+        for i, block in enumerate(self.transformer.h):
+            block.attn.layer_idx.fill_(i+1) # easy ratio check 
+            block.layer_idx = i+1  
 
     def forward(self, idx, targets=None):
         
