@@ -8,20 +8,20 @@ Planned features:
 
  - 256K ctx, extendable to 1M (mini trained on 4096 ctx)
  - MLA or GQA, minimize the KV cache
- - ultra-sparse MoE (1%-5% active params), along with shared experts 
- - 3/4 layers use SWA at 128 ctx (from MiMO flash paper), 4th layer uses global attn 
+ - ultra-sparse MoE (1%-5% active params), along with shared experts  
  - DSA deepseek lightning indexer (uses 2k for 128k, 1.5% of tokens, use 64 for 4096)
  - 4 MTP layers, all using SWA, used for spec decoding
- - Fast triton/cuteDSL Kernels for all features, all 
- - proper experimental logging, configs, containerized 
- - FP8 training or int8 QAT checkpoint, maybe NVFP4 training
- - full inferencing solution VLLM style, paged attn, KV cache, based off the mini SGlang repo
+ - Fast triton/cuteDSL Kernels for big features (high mfu) 
+ - FP8 training (hopper)
+ - add model to VLLM or SGlang internally, (ex. inside `model_executors` for vllm, use the paged_attn in forward pass)
  
 Completed:
 
  - scaling configs (0.08M test, 15M small, 1B big)
  - MuP rules
  - HP sweeps 
+ - 3/4 layers use SWA at 128 ctx (from MiMO flash paper)
+ - proper experimental logging, configs, *containerized (need to drop in docker later) 
 
 ## Throughput Comparisions
 

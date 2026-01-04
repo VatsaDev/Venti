@@ -63,7 +63,7 @@ class RoPE(nn.Module):
 
 class MHA(nn.Module):
 
-    def __init__(self):
+    def __init__(self, layer_n):
         super().__init__()
 
         assert config['n_embd'] % config['n_head'] == 0
@@ -79,6 +79,8 @@ class MHA(nn.Module):
         self.dropout = config['dropout']
         self.block_size = config['ctx_len']
 
+        self.is_global = (layer_n % config["swa_ratio"] == 0)
+
         # qk norm and rope share the same size
 
         self.q_norm = RMSNorm(self.n_embd//self.n_head) 
@@ -87,6 +89,9 @@ class MHA(nn.Module):
         # rope
 
         self.rope = RoPE(self.n_embd//self.n_head)
+
+
+        # SWA, mark I'm sliding it mark
         
         window = 128
         size = config['block_size']
@@ -136,7 +141,7 @@ class MHA(nn.Module):
             # MuP 1/d scale, not 1/root(d)
             # 3/4 layers are now SWA
 
-            if self.layer_idx.item() % config["swa_ratio"] == 0:
+            if self.is_global:
                 y = flash_attn(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True, scale=(1.0 / k.size(-1)))
             else:
                 y = flash_attn(q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0, is_causal=False, scale=(1.0 / k.size(-1)))
@@ -186,10 +191,10 @@ class MLP(nn.Module):
 
 class Block(nn.Module):
 
-    def __init__(self):
+    def __init__(self, layer_n):
         super().__init__()
         self.rm_1 = RMSNorm(config['n_embd'])
-        self.attn = MHA()
+        self.attn = MHA(layer_n)
         self.rm_2 = RMSNorm(config['n_embd'])
         self.mlp = MLP()
 
@@ -209,7 +214,7 @@ class Transformer(nn.Module):
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config['vocab_size'], config['n_embd']), # tok embd 
             drop = nn.Dropout(config['dropout']),
-            h = nn.ModuleList([Block() for _ in range(config['n_layer'])]) 
+            h = nn.ModuleList([Block(layer_n=i) for i in range(config["n_layer"])]) 
         ))
 
         self.lm_head = nn.Linear(config['n_embd'], config['vocab_size'], bias=False)
@@ -393,3 +398,4 @@ class Transformer(nn.Module):
         mfu = flops_achieved / flops_promised
         tflops = flops_achieved / 1e12
         return mfu, tflops
+

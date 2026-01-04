@@ -1,13 +1,13 @@
 # 16M param model stats here
 
 n_embd = 256 # MuP minimum
-n_layer = 16
+n_layer = 17 # 0-16, makes the last layer global
 n_head = 2
 
-batch_size = 8
+batch_size = 16
 block_size = 4096 # ctx_len
 eval_interval = 20
-grad_accum_steps = 4 # basically microbatch
+grad_accum_steps = 2 # basically microbatch
 
 lr = 3e-3
 min_lr = 3e-4
@@ -22,4 +22,3 @@ weight_decay = 0.01
 swa_ratio = 4 # every 4th layer is global
 
 data_dir = "synth"
-
