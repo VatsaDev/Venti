@@ -26,7 +26,6 @@ def plot_runs(run_names, db_path="log.db"):
         print(f"CRITICAL: Connection failed: {e}")
         return
 
-    # Master pool of high-saturation bright colors
     COLOR_POOL = [
         "#00FFC2", "#FF007F", "#7FFF00", "#FF9D00", "#00D4FF", 
         "#BD00FF", "#FF3B30", "#FFFF00", "#5856D6", "#FF2D55", 
@@ -34,7 +33,6 @@ def plot_runs(run_names, db_path="log.db"):
         "#FF5E00", "#4CD964", "#FFCC00", "#FF9500", "#5AC8FA"
     ]
 
-    # UI STYLE: Deep black background with visible white/grey accents
     DARK_BG, CARD_BG, GRID_COLOR = '#080808', '#121212', '#282828'
     AXIS_WHITE = '#ffffff'
     TICK_GREY = '#bbbbbb'
@@ -58,11 +56,10 @@ def plot_runs(run_names, db_path="log.db"):
     for g_idx, group in enumerate(groups):
         fig, ax = plt.subplots(figsize=(14, 8))
         
-        is_smooth_metric = any(m in group["title"] for m in ["loss", "pplx"])
-        title_prefix = "train & val / " if is_smooth_metric else "train / "
+        is_dual = any(m in group["title"] for m in ["loss", "pplx"])
+        title_prefix = "train & val / " if is_dual else "train / "
         ax.set_title(f"{title_prefix}{group['title']}", loc='left', pad=45, fontweight='bold', fontsize=24)
         
-        # Brighter grid for dark mode
         ax.grid(True, axis='both', alpha=0.25, linestyle=':')
         for spine in ax.spines.values():
             spine.set_linewidth(1.5)
@@ -71,7 +68,6 @@ def plot_runs(run_names, db_path="log.db"):
         
         for run in run_names:
             try:
-                # Quoted table name exactly as provided
                 query = f'SELECT step, {", ".join(group["cols"])} FROM "{run}" WHERE step IS NOT NULL ORDER BY step ASC'
                 df = con.execute(query).df()
             except Exception: continue
@@ -82,45 +78,37 @@ def plot_runs(run_names, db_path="log.db"):
             for col_idx, col in enumerate(group["cols"]):
                 if col not in df.columns: continue
                 
-                # Separate NaNs to fix sparse logging/missing val lines
                 df_col = df[['step', col]].dropna()
                 if df_col.empty: continue
                 
-                # SEED LOGIC: Deterministic colors based on run name + offset
                 color_offset = (g_idx * 17 + col_idx * 11) 
                 line_color = get_consistent_color(run, COLOR_POOL, offset=color_offset)
                 
                 is_val = "val" in col
                 label_suffix = " (val)" if is_val and len(group["cols"]) > 1 else ""
-                z_order = 3 if is_val else 4 # Ensure Train draws over Val
+                z_order = 3 if is_val else 4
 
-                # 1. RAW DATA (Fuzz) - Increased alpha for visibility on OLED/Black screens
+                # 1. RAW DATA (Fuzz)
                 ax.plot(df_col['step'], df_col[col], color=line_color, alpha=0.22, linewidth=1, zorder=z_order-1)
 
-                # 2. SMOOTHING - FIXED LAG
-                # Dropped span from 40 to 10 for high responsiveness (reacts fast to crashes)
-                if is_smooth_metric:
-                    y_data = df_col[col].ewm(span=min(10, len(df_col)), adjust=True).mean()
-                else:
-                    y_data = df_col[col]
+                # 2. MAIN LINE (Smoothing removed entirely)
+                y_data = df_col[col]
 
-                # 3. MAIN LINE
+                # 3. PLOT
                 line, = ax.plot(df_col['step'], y_data, color=line_color, linewidth=3.2, zorder=z_order)
                 
-                # Stats for Legend
-                last_v, raw_v, last_s = y_data.iloc[-1], df_col[col].iloc[-1], df_col['step'].iloc[-1]
+                last_v, last_s = y_data.iloc[-1], df_col['step'].iloc[-1]
                 
-                # 4. DOT - Larger train dot, smaller val dot to show both if overlapping
+                # 4. DOT
                 dot_size = 55 if is_val else 90
                 ax.scatter(last_s, last_v, color=line_color, s=dot_size, zorder=z_order + 10, edgecolors=DARK_BG, linewidth=1.5)
                 
-                line.set_label(f"{last_v:.4f} ({raw_v:.4f}) — {run}{label_suffix}")
+                line.set_label(f"{last_v:.4f} — {run}{label_suffix}")
 
         if has_data:
             ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, p: f'{int(x/1000)}k' if x >= 1000 else f'{int(x)}'))
             ax.tick_params(axis='both', which='major', labelsize=12, pad=18)
             
-            # Ensure the chart frames the raw data correctly
             ax.relim()
             ax.autoscale_view()
             

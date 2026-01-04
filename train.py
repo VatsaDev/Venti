@@ -241,8 +241,8 @@ print(f"{p/1e6:.2f} M parameters")
 # --- Compile ---
 print("compilation step")
 if device == "cuda":
-    # trying reduce-overhead to see if cuda graphs fix perf
-    compiled_model = torch.compile(m, mode="reduce-overhead")
+    # trying reduce-overhead to see if cuda graphs fix perf (didnt work)
+    compiled_model = torch.compile(m)
     print("compiled")
 else:
     compiled_model = m
@@ -353,6 +353,15 @@ total_tokens = len(sample_xb[0])
 # Tokens per Byte ratio
 tokens_per_byte = total_tokens / total_bytes
 
+# fixing the rmsnorm fp16 vs fp32 issue
+
+# Force all model parameters to half EXCEPT the ones Muon/Adam need in FP32 
+# need the internal RMSNorm weights to be FP16 for the kernels.
+
+for name, p in m.named_parameters():
+    if "norm" in name.lower():
+        p.data = p.data.to(torch.float16)
+
 for iter_num in range(start_iter, max_iters + 1):
 
     # cos lr schedule 
@@ -408,10 +417,7 @@ for iter_num in range(start_iter, max_iters + 1):
             con.execute(row_add)
         con.close() 
 
-        subprocess.Popen(["python", "plotgen.py", f"_{run_name}"])
-
-        if hasattr(m, 'generate'):
-             generate_text(m, tok, max_new_tokens=200) 
+        subprocess.Popen(["python", "plotgen.py", f"_{run_name}"]) 
          
     if iter_num == max_iters: break 
 
@@ -419,11 +425,14 @@ for iter_num in range(start_iter, max_iters + 1):
     
     loss_accum = 0.0
     for micro_step in range(grad_accum_steps):
+
+        torch.compiler.cudagraph_mark_step_begin()
+
         xb, yb = get_batch_from_shards('train', data_gens)
 
         # FP16 Context (T4 safe)
         with ctx:
-            logits, loss = compiled_model(xb, yb)
+            logits, loss = compiled_model(xb.clone(), yb.clone())
             loss = loss / grad_accum_steps 
 
         # Scaled Backward Pass (Prevents underflow in FP16)
@@ -488,5 +497,8 @@ for iter_num in range(start_iter, max_iters + 1):
         print(f"--- Benchmark Results at Step {iter_num} ---")
         print(f"HellaSwag BPB: {hswag_bpb:.4f}")
 
+        if hasattr(m, 'generate'):
+            generate_text(m, tok, max_new_tokens=200)
 
 print('Training finished.')
+

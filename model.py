@@ -14,6 +14,17 @@ config = {
     "bias": False,           
 }
 
+class RMSNorm(torch.nn.Module):
+    def __init__(self, dim, eps=1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = torch.nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        # x is FP16 (from autocast). We force weight to match x
+        # This hopefully triggers the 'Fused' kernel on the T4
+        return torch.nn.functional.rms_norm(x, (x.shape[-1],), self.weight.to(x.dtype), self.eps)
+
 class RoPE(nn.Module):
 
     def __init__(self, d_head):
@@ -68,8 +79,8 @@ class MHA(nn.Module):
 
         # qk norm and rope share the same size
 
-        self.q_norm = nn.RMSNorm(self.n_embd//self.n_head) 
-        self.k_norm = nn.RMSNorm(self.n_embd//self.n_head)
+        self.q_norm = RMSNorm(self.n_embd//self.n_head) 
+        self.k_norm = RMSNorm(self.n_embd//self.n_head)
 
         # rope
 
@@ -153,9 +164,9 @@ class Block(nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.ln_1 = nn.RMSNorm(config['n_embd'])
+        self.ln_1 = RMSNorm(config['n_embd'])
         self.attn = MHA()
-        self.ln_2 = nn.RMSNorm(config['n_embd'])
+        self.ln_2 = RMSNorm(config['n_embd'])
         self.mlp = MLP()
 
         self.branch_scale = 1.0 / math.sqrt(config['n_layer']) # MuP residual rule a/root(L), a = 1.0 here
@@ -215,7 +226,7 @@ class Transformer(nn.Module):
         assert t <= self.block_size, f"Cannot forward sequence of length {t}, block size is only {self.block_size}" 
         
         # forward the GPT model itself
-        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)        
+        tok_emb = self.transformer.wte(idx).clone() # token embeddings of shape (b, t, n_embd)        
         x = self.transformer.drop(tok_emb)
         
         for block in self.transformer.h:
