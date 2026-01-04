@@ -25,4 +25,3 @@ Initial LR sweep, LR, dropout, Weight Decay
 Tested multiple LRs, found a optimal value for the 0.74M model, the winning LR was 3e-3, it might be due to scale, will test at 15M and 100M
 
 <img width="7200" height="3000" alt="lr_s_split_saturated" src="https://github.com/user-attachments/assets/5e444a5e-c645-42b7-aa98-c6d49d42fb38" />
-

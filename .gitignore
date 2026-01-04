@@ -4,4 +4,7 @@ __pycache__/
 plots/
 checkpoints/
 sweeps/
+sweep_results.md
+log.db
+log.db.wal
 *.zip

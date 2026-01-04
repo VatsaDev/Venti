@@ -5,10 +5,12 @@ import glob
 import torch
 import string
 import random
+import duckdb
 import pickle
 import tomllib
 import argparse
 import itertools
+import subprocess
 import numpy as np
 from pathlib import Path
 from torch.cuda.amp import GradScaler
@@ -63,9 +65,6 @@ ptdtype = torch.float16
 
 print(f"Using device: {device}")
 
-train_losses_history = []
-val_losses_history = []
-
 # Initialize Scaler, needed for FP16 training on T4 to prevent underflow?
 scaler = GradScaler(enabled=True)
 ctx = torch.amp.autocast(device_type=device, dtype=ptdtype)
@@ -77,6 +76,25 @@ run_name = ''.join(random.choice(characters) for i in range(6))
 # check plots/checkpoints
 if not os.path.exists('checkpoints'): os.makedirs('checkpoints')
 if not os.path.exists('plots'): os.makedirs('plots')
+
+# make the duckdb database, new table for current run
+
+table_format = f"""
+CREATE TABLE _{run_name} (
+   step INT,
+   lr FLOAT,
+   train_loss FLOAT,
+   val_loss FLOAT, 
+   train_pplx FLOAT,
+   val_pplx FLOAT,
+   val_bpb FLOAT,
+   throughput FLOAT
+);
+"""
+
+logging = duckdb.connect("log.db")
+logging.sql(table_format)
+logging.close()
 
 # encoding 
 tok = AutoTokenizer.from_pretrained("tokenizers/venti_4k")
@@ -91,25 +109,6 @@ model.config["n_head"] = data["n_head"]
 model.config["ctx_len"] = block_size
 model.config["vocab_size"] = vocab_size
 model.config["dropout"] = data["dropout"]
-
-# nice wandb styles
-plt.style.use('default') 
-matplotlib.rcParams['font.family'] = 'sans-serif'
-matplotlib.rcParams['axes.spines.top'] = False 
-matplotlib.rcParams['axes.spines.right'] = False 
-matplotlib.rcParams['axes.facecolor'] = '#f0f0f0' 
-matplotlib.rcParams['figure.facecolor'] = '#f0f0f0' 
-matplotlib.rcParams['grid.alpha'] = 0.4 
-matplotlib.rcParams['axes.titlesize'] = 12 
-matplotlib.rcParams['axes.labelsize'] = 12 
-matplotlib.rcParams['xtick.labelsize'] = 10 
-matplotlib.rcParams['ytick.labelsize'] = 10 
-matplotlib.rcParams['legend.fontsize'] = 10 
-matplotlib.rcParams['axes.titlecolor'] = 'grey' 
-matplotlib.rcParams['axes.labelcolor'] = 'grey' 
-matplotlib.rcParams['xtick.color'] = 'grey' 
-matplotlib.rcParams['ytick.color'] = 'grey' 
-matplotlib.rcParams['legend.labelcolor'] = 'grey' 
 
 # hellaswag
 
@@ -213,14 +212,10 @@ if resume:
         scaler.load_state_dict(checkpoint['scaler'])
 
     start_iter = checkpoint['iter'] + 1 
-    run_name = checkpoint['run_name']
-    train_losses_history = checkpoint.get('train_losses_history', [])
-    val_losses_history = checkpoint.get('val_losses_history', [])
-
-    train_losses_history = [x.item() if isinstance(x, torch.Tensor) else x for x in train_losses_history]
-    val_losses_history = [x.item() if isinstance(x, torch.Tensor) else x for x in val_losses_history]
+    run_name = checkpoint['run_name'] 
 
 else:
+
     model_instance = Transformer()
     m = model_instance.to(device)
     
@@ -350,8 +345,10 @@ tokens_per_byte = total_tokens / total_bytes
 
 for iter_num in range(start_iter, max_iters + 1):
 
-    # Learning rate schedule
+    # cos lr schedule 
+
     lr_iter = min_lr 
+    
     if iter_num < warmup_iters:
         lr_iter = lr * iter_num / warmup_iters
     elif iter_num <= max_iters:
@@ -359,12 +356,24 @@ for iter_num in range(start_iter, max_iters + 1):
         coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) 
         lr_iter = min_lr + coeff * (lr - min_lr)
 
+    # lr assignment
+
     for opt in [opt_adam, opt_muon]:
         for param_group in opt.param_groups:
             param_group['lr'] = lr_iter
 
-    # --- Evaluation ---
+    # training steps
+
     if iter_num % eval_interval == 0 or iter_num == max_iters:
+        
+        time_n = time.time()
+        elapsed = time_n - time_s
+        dt = time_n - prev_time 
+        prev_time = time_n
+
+        throughput = (block_size * batch_size * grad_accum_steps * eval_interval) / dt
+        mfu, tflops = m.estimate_mfu(block_size * batch_size * grad_accum_steps * eval_interval, dt) if hasattr(m, 'estimate_mfu') else 0.0
+
         losses = estimate_loss(m, data_gens)
         
         # loss
@@ -372,44 +381,30 @@ for iter_num in range(start_iter, max_iters + 1):
         val_loss = losses['val']
         
         # perplexity
-        train_ppl = torch.exp(torch.tensor(train_loss)).item()
-        val_ppl = torch.exp(torch.tensor(val_loss)).item()
+        train_ppl = math.exp(train_loss)
+        val_ppl = math.exp(val_loss)
 
         # bits/byte val loss (tokenizer invariant)
         val_bpb = (val_loss/math.log(2)) * tokens_per_byte
+                
+        print(f"step: {iter_num}, train loss: {losses['train']:.4f}, val loss: {val_loss:.4f}, train pplx: {train_ppl:.4f}, val pplx: {val_ppl:.4f}, val bpb: {val_bpb:.4f}, lr: {lr_iter:.6f}, elapsed: {elapsed/60:.2f} min, MFU: {mfu*100:.2f}%, throughput: {throughput:.2f} tok/s, tflops: {tflops:.2f}")
 
-        val_losses_history.append(val_loss)
-        
-        time_n = time.time()
-        elapsed = time_n - time_s
-        dt = time_n - prev_time 
-        prev_time = time_n
-        mfu = m.estimate_mfu(block_size * batch_size * grad_accum_steps, dt) if hasattr(m, 'estimate_mfu') else 0.0
+        # everything to duckdb 
+        row_add = f"""INSERT INTO "_{run_name}"
+        VALUES ({iter_num},{lr_iter},{train_loss:.4f},{val_loss:.4f},{train_ppl:.4f},{val_ppl:.4f},{val_bpb:.4f},{throughput:.4f});
+        """
 
-        print(f"step: {iter_num}, train loss: {losses['train']:.4f}, val loss: {val_loss:.4f}, train pplx: {train_ppl}, val pplx: {val_ppl}, val bpb: {val_bpb:.4f}, lr: {lr_iter:.6f}, elapsed: {elapsed/60:.2f} min, MFU: {mfu*100:.2f}%")
+        with duckdb.connect("log.db") as con:
+            con.execute(row_add)
+        con.close() 
+
+        subprocess.Popen(["python", "plotgen.py", f"_{run_name}"])
 
         if hasattr(m, 'generate'):
              generate_text(m, tok, max_new_tokens=200) 
-        
-        # --- Plotting ---
-        plt.figure(figsize=(8, 4), dpi=100)
-        iterations_eval = [i * eval_interval for i in range(len(val_losses_history))]
-        iterations_train = range(len(train_losses_history)) 
-        
-        if len(train_losses_history) > 0:
-            plt.plot(iterations_train, train_losses_history, label='Train', color='royalblue', alpha=0.8)
-        if len(val_losses_history) > 0:
-            plt.plot(iterations_eval, val_losses_history, label='Val', color='palevioletred', alpha=0.8)
-
-        plt.title(f"Loss - Run: {run_name}")
-        plt.legend()
-        plt.grid(alpha=0.3)
-        plt.savefig(f"plots/{run_name}_plot_{iter_num}.png", bbox_inches='tight')
-        plt.close()
-
+         
     if iter_num == max_iters: break 
 
-    # --- Training Step ---
     m.train()
     
     loss_accum = 0.0
@@ -424,8 +419,6 @@ for iter_num in range(start_iter, max_iters + 1):
         # Scaled Backward Pass (Prevents underflow in FP16)
         scaler.scale(loss).backward()
         loss_accum += loss.item() * grad_accum_steps 
-
-    train_losses_history.append(loss_accum/grad_accum_steps)
 
     # Unscale before clipping
     scaler.unscale_(opt_adam)
@@ -446,6 +439,7 @@ for iter_num in range(start_iter, max_iters + 1):
     if iter_num % ckpt_iter == 0:
         ckpt_path = f'checkpoints/{run_name}_{iter_num}.pt'
         print(f"Saving checkpoint to {ckpt_path}")
+        
         # Save standard checkpoint (Weights + Optimizer State)
         torch.save({
             'model': m.state_dict(),
@@ -454,12 +448,10 @@ for iter_num in range(start_iter, max_iters + 1):
             'scaler': scaler.state_dict(),
             'iter': iter_num,
             'run_name': run_name,
-            'config': model.config,
-            'train_losses_history': train_losses_history,
-            'val_losses_history': val_losses_history,
+            'config': model.config
         }, ckpt_path)
 
-        # --- Optimzied FP16 Save (T4 Safe) ---
+        # FP16 Save (T4 Safe)
         print("Saving lightweight FP16 inference model...")
         fp16_inference_path = f'checkpoints/{run_name}_inference_fp16.pt'
 
@@ -488,20 +480,3 @@ for iter_num in range(start_iter, max_iters + 1):
 
 
 print('Training finished.')
-
-final_val_loss = val_losses_history[-1] if val_losses_history else 0
-final_val_ppl = math.exp(final_val_loss)
-final_val_bpb = (final_val_loss/math.log(2)) * tokens_per_byte
-
-summary_file = "sweep_results.md"
-file_exists = os.path.isfile(summary_file)
-
-with open(summary_file, "a") as f:
-    if not file_exists or os.path.getsize(summary_file) == 0:
-        f.write("| Config Path | Run ID | Val Loss | Val PPL | Val BPB |\n")
-        f.write("|--- |--- |--- |--- |--- |--- |\n")
-    
-    config_name = os.path.basename(conf_path)
-    f.write(f"| {config_name} | {run_name} | {final_val_loss:.4f} | {final_val_ppl:.2f} | {final_val_bpb:.4f} |\n")
-
-print(f"Results appended to {summary_file}")

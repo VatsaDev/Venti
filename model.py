@@ -173,8 +173,7 @@ class Transformer(nn.Module):
         self.block_size = config['ctx_len']
 
         self.transformer = nn.ModuleDict(dict(
-            wte = nn.Embedding(config['vocab_size'], config['n_embd']), # tok embd
-            wpe = nn.Embedding(self.block_size, config['n_embd']), # pos embd
+            wte = nn.Embedding(config['vocab_size'], config['n_embd']), # tok embd 
             drop = nn.Dropout(config['dropout']),
             h = nn.ModuleList([Block() for _ in range(config['n_layer'])]) 
         ))
@@ -198,11 +197,9 @@ class Transformer(nn.Module):
 
     def _init_weights(self, module):
     
-        if isinstance(module, nn.Linear):
-            if module.out_features == config['vocab_size']: # LM_head check
-                torch.nn.init.zeros_(module.weight) # MuP at all-zero LM head better stability
-            else:
+        if isinstance(module, nn.Linear): 
                 # MuP std = 1 / sqrt(fan_in)
+                # all zero embd init is bad actually
                 fan_in = module.weight.size(1)
                 std = 1.0 / math.sqrt(fan_in)
                 torch.nn.init.normal_(module.weight, mean=0.0, std=std)
@@ -216,15 +213,11 @@ class Transformer(nn.Module):
         device = idx.device
         b, t = idx.size()
 
-        assert t <= self.block_size, f"Cannot forward sequence of length {t}, block size is only {self.block_size}"
-
-        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+        assert t <= self.block_size, f"Cannot forward sequence of length {t}, block size is only {self.block_size}" 
         
         # forward the GPT model itself
-        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
-        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
-        
-        x = self.transformer.drop(tok_emb + pos_emb)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)        
+        x = self.transformer.drop(tok_emb)
         
         for block in self.transformer.h:
             x = block(x)
@@ -340,36 +333,24 @@ class Transformer(nn.Module):
 
         return [optimizer_muon, optimizer_adam]
     
-    def estimate_mfu(self, fwdbwd_per_iter, dt): # completely need to change this function, its too old
-        """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS """
-        # first estimate the number of flops we do per iteration.
-        # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
-        N = sum(p.numel() for p in self.parameters()) # Use actual parameter count
-        cfg = self.transformer.h[0].attn # Get config from an attention block instance if needed
-                                         # Or better, access directly if stored on self or use model.config
-                                         # For now, let's assume model.config is globally updated
-        L, H, Q, T = config['n_layer'], config['n_head'], config['n_embd']//config['n_head'], self.block_size
+    def estimate_mfu(self, total_tokens_per_iter, dt):
+        """
+        Estimate Model FLOPs Utilization (MFU) using the 6N approximation.
+        total_tokens_per_iter: batch_size * block_size * grad_accum_steps * world_size
+        dt: time for one full training iteration (seconds)
+        """
 
-        flops_per_token = 6*N + 12*L*H*Q*T
-        flops_per_fwdbwd = flops_per_token * T
-        flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
-        # express our flops throughput as ratio of A100 bfloat16 peak FLOPS
-        flops_achieved = flops_per_iter * (1.0/dt) # per second
-        # Adjust peak flops based on hardware if necessary
-        # A100 = 312 TFLOPS (BF16), H100 = 989 TFLOPS (FP16) / 495 TFLOPS (TF32)
-        # T4 = 65 TFLOPS (FP16)
-        flops_promised = 312e12 # A100 BF16 peak flops
-        if torch.cuda.is_available():
-             dev_prop = torch.cuda.get_device_properties(torch.cuda.current_device())
-             if dev_prop.major >= 8: # Ampere or newer
-                 # Use BF16 peak for A100
-                 flops_promised = 312e12
-                 if dev_prop.major >= 9: # Hopper
-                      # Using FP16 peak for H100, adjust if using TF32
-                      flops_promised = 989e12
-             elif dev_prop.major == 7: # Volta/Turing (like T4)
-                 flops_promised = 65e12 # T4 FP16 peak
-
+        # Simplified: sum(p.numel() for p in self.parameters())
+        N = sum(p.numel() for p in self.parameters())
+    
+        # 6N comes from: 2N (forward) + 4N (backward)
+        # This is the "standard" estimator for Transformer FLOPs
+        flops_per_token = 6 * N
+        flops_per_iter = flops_per_token * total_tokens_per_iter
+    
+        flops_promised = 65e12 # T4 number
+        
+        flops_achieved = flops_per_iter / dt
         mfu = flops_achieved / flops_promised
-        return mfu
-
+        tflops = flops_achieved / 1e12
+        return mfu, tflops
