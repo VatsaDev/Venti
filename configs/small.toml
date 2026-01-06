@@ -22,3 +22,4 @@ weight_decay = 0.01
 swa_ratio = 4 # every 4th layer is global
 
 data_dir = "synth"
+tokenizer = "Qwen/Qwen3-1.7B"

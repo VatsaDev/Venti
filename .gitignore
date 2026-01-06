@@ -1,5 +1,7 @@
 synth/
 synth_text/
+qwen_text/
+venv/
 __pycache__/
 plots/
 checkpoints/

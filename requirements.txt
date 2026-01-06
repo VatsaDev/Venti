@@ -1,0 +1,8 @@
+torch
+transformers
+datasets
+tokenizers
+duckdb
+pandas
+numpy
+matplotlib

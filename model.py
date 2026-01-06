@@ -4,6 +4,8 @@ import inspect
 import torch.nn as nn
 from torch.nn import functional as F
 from torch.nn.functional import scaled_dot_product_attention as flash_attn
+from torch.nn.attention.flex_attention import flex_attention as flex_attn
+from torch.nn.attention.flex_attention import create_block_mask
 
 config = {
     "n_embd": 128,         
@@ -13,7 +15,8 @@ config = {
     "vocab_size": 50257,
     "ctx_len": 1024,
     "swa_ratio": 4, # 3/4 layers swa, every 4th layer is global
-    "bias": False,           
+    "bias": False,
+    "gradient_checkpointing": True,
 }
 
 class RMSNorm(torch.nn.Module):
@@ -28,138 +31,134 @@ class RMSNorm(torch.nn.Module):
         return torch.nn.functional.rms_norm(x, (x.shape[-1],), self.weight.to(x.dtype), self.eps)
 
 class RoPE(nn.Module):
-
     def __init__(self, d_head):
         super().__init__()
         self.d_head = d_head
         self.ctx = config['ctx_len']
 
-        # Precompute cos and sin instead of complex numbers
+        # Precompute cos and sin (Keep your existing init logic)
         inv_freq = 1.0 / (1000000.0 ** (torch.arange(0, d_head, 2).float() / d_head))
         t = torch.arange(self.ctx, dtype=torch.float)
-        freqs = torch.einsum("i,j->ij", t, inv_freq) # (ctx, d_head/2)
+        freqs = torch.einsum("i,j->ij", t, inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)
 
-        # We repeat the frequencies so they match the full d_head
-        emb = torch.cat((freqs, freqs), dim=-1) # (ctx, d_head)
-        
         self.register_buffer('cos', emb.cos().view(1, 1, self.ctx, d_head))
         self.register_buffer('sin', emb.sin().view(1, 1, self.ctx, d_head))
 
     def rotate_half(self, x):
-        """Rotates half the hidden dims of the input."""
         x1 = x[..., : x.shape[-1] // 2]
         x2 = x[..., x.shape[-1] // 2 :]
         return torch.cat((-x2, x1), dim=-1)
 
-    def forward(self, x):
+    def forward(self, x, offset=0):
         # x shape: (B, nh, T, hs)
         T = x.size(2)
-        cos = self.cos[:, :, :T, :]
-        sin = self.sin[:, :, :T, :]
         
-        # This is the real-valued equivalent of complex multiplication:
-        # (x * cos) + (rotate_half(x) * sin)
+        # --- OFFSET LOGIC ---
+        # Instead of 0:T, we take offset : offset + T
+        # If offset is 50 and T is 1, we get the embedding for the 51st position.
+        cos = self.cos[:, :, offset : offset + T, :]
+        sin = self.sin[:, :, offset : offset + T, :]
+
         return (x * cos) + (self.rotate_half(x) * sin)
 
-class MHA(nn.Module):
+# mask mods and score mods for flex_attn, causal and SWA 
 
+def causal_mask_mod(score, b, h, q, kv):
+    return torch.where(q >= kv, score, -float('inf'))
+
+def swa_mask_mod(score, b, h, q, kv):
+    window_size = 128 # Matching your screenshot
+    return torch.where((q >= kv) & (q - kv <= window_size), score, -float('inf'))
+
+def causal_mask_fn(b, h, q, kv): 
+    return q >= kv
+
+def swa_mask_fn(b, h, q, kv): 
+    return (q >= kv) & (q - kv <= 128)
+
+class MQA(nn.Module):
     def __init__(self, layer_n):
         super().__init__()
-
+        
         assert config['n_embd'] % config['n_head'] == 0
-
-        self.c_attn = nn.Linear(config['n_embd'], 3 * config['n_embd'], bias=config.get('bias', False))
-        self.c_proj = nn.Linear(config['n_embd'], config['n_embd'], bias=config.get('bias', False))
-
-        self.attn_dropout = nn.Dropout(config['dropout'])
-        self.resid_dropout = nn.Dropout(config['dropout'])
-
+        
         self.n_embd = config['n_embd']
         self.n_head = config['n_head']
-        self.dropout = config['dropout']
         self.block_size = config['ctx_len']
-
+        self.head_dim = self.n_embd // self.n_head
+        self.window_size = 128 
+        
+        self.c_attn = nn.Linear(config['n_embd'], config['n_embd'] + 2 * self.head_dim, bias=config.get('bias', False))
+        self.c_proj = nn.Linear(config['n_embd'], config['n_embd'], bias=config.get('bias', False))
+        self.attn_dropout = nn.Dropout(config['dropout'])
+        self.resid_dropout = nn.Dropout(config['dropout'])
+        
         self.is_global = (layer_n % config["swa_ratio"] == 0)
-
-        # qk norm and rope share the same size
-
-        self.q_norm = RMSNorm(self.n_embd//self.n_head) 
-        self.k_norm = RMSNorm(self.n_embd//self.n_head)
-
-        # rope
-
-        self.rope = RoPE(self.n_embd//self.n_head)
-
-
-        # SWA, mark I'm sliding it mark
+        self.cache_len = self.block_size if self.is_global else self.window_size
         
-        window = 128
-        size = config['block_size']
-        mask = torch.ones(size, size).tril().triu(diagonal=-window).to(torch.bool)
-        self.register_buffer("swa_mask", mask.view(1, 1, size, size))
-
-        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
-        if not self.flash:
-            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
-            # causal mask to ensure that attention is only applied to the left in the input sequence
-            self.register_buffer("bias", torch.tril(torch.ones(self.block_size, self.block_size))
-                                        .view(1, 1, self.block_size, self.block_size))
-
-        self.register_buffer('layer_idx', torch.tensor(-1))
-
-        # KV cache (tbd)
-
-    def forward(self, x):
-        B, T, C = x.size() # bs, ctx_len, n_embd
-
-        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-
-        q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        # Select appropriate functions
+        mask_fn = causal_mask_fn if self.is_global else swa_mask_fn
+        self.score_mod = causal_mask_mod if self.is_global else swa_mask_mod
         
-        # qk norm
-        q = self.q_norm(q)
-        k = self.k_norm(k) 
+        # Pre-compute block mask
+        self.full_block_mask = create_block_mask(mask_fn, 1, 1, self.block_size, self.block_size, device="cuda")
+        
+        # Compile flex_attention ONCE during init
+        self.flex = torch.compile(flex_attn)
+        
+        self.q_norm = RMSNorm(self.head_dim)
+        self.k_norm = RMSNorm(self.head_dim)
+        self.rope = RoPE(self.head_dim)
+        
+        self.register_buffer("k_cache", torch.zeros(1, 1, self.cache_len, self.head_dim))
+        self.register_buffer("v_cache", torch.zeros(1, 1, self.cache_len, self.head_dim))
 
-        # qk rope
-        q = self.rope(q) 
-        k = self.rope(k)
-
-        # norm forced a higher dtype, set back to fp16 all to fulfill flex_attn 
-
-        q = q.to(v.dtype)
-        k = k.to(v.dtype)
-
-        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-
-        mask = self.swa_mask[:, :, :T, :T]
-
-        if self.flash:            
-
-            # MuP 1/d scale, not 1/root(d)
-            # 3/4 layers are now SWA
-
-            if self.is_global:
-                y = flash_attn(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True, scale=(1.0 / k.size(-1)))
+    def forward(self, x, start_pos=0, use_cache=False):
+        B, T, C = x.size()
+        
+        # Projections
+        q, k, v = self.c_attn(x).split([self.n_embd, self.head_dim, self.head_dim], dim=2)
+        q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        k = k.view(B, T, 1, self.head_dim).transpose(1, 2)
+        v = v.view(B, T, 1, self.head_dim).transpose(1, 2)
+        
+        # Norms and RoPE
+        q, k = self.q_norm(q), self.k_norm(k)
+        q = self.rope(q, offset=start_pos)
+        k = self.rope(k, offset=start_pos)
+        
+        if use_cache:
+            write_pos = start_pos % self.cache_len
+            self.k_cache[:B, :, write_pos : write_pos + T, :] = k
+            self.v_cache[:B, :, write_pos : write_pos + T, :] = v
+            
+            if start_pos + T > self.cache_len:
+                # SWA Rolling: Unroll so indices are chronological
+                full_k = torch.roll(self.k_cache[:B], shifts=-(write_pos + T), dims=2)
+                full_v = torch.roll(self.v_cache[:B], shifts=-(write_pos + T), dims=2)
+                kv_len = self.cache_len
             else:
-                y = flash_attn(q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0, is_causal=False, scale=(1.0 / k.size(-1)))
-                     
+                kv_len = start_pos + T
+                full_k = self.k_cache[:B, :, :kv_len, :]
+                full_v = self.v_cache[:B, :, :kv_len, :]
         else:
-            # manual implementation of attention
-            att = (q @ k.transpose(-2, -1)) * (1.0 / k.size(-1)) # MuP scaling
-            att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
-            att = F.softmax(att, dim=-1)
-            att = self.attn_dropout(att)
-            y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        
-        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs
+            full_k, full_v, kv_len = k, v, T
 
-        # output projection
-        y = self.resid_dropout(self.c_proj(y))
-        
-        return y
+        q, full_k = q.to(v.dtype), full_k.to(v.dtype)
+
+        # --- Dynamic Masking Dispatch ---
+        # If sequence fits in one block, use dense score_mod path
+        # If it's larger, use the block_mask sparsity path
+        if T < 128:
+            y = self.flex(q, full_k, full_v, score_mod=self.score_mod, enable_gqa=True)
+        else:
+            # Note: start_pos and T must be passed carefully to avoid re-compiles
+            current_mask = self.full_block_mask._adjust(T, kv_len)
+            y = self.flex(q, full_k, full_v, block_mask=current_mask, enable_gqa=True)
+
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        return self.resid_dropout(self.c_proj(y))
 
 # Swiglu replaces MLP 
 
@@ -194,14 +193,15 @@ class Block(nn.Module):
     def __init__(self, layer_n):
         super().__init__()
         self.rm_1 = RMSNorm(config['n_embd'])
-        self.attn = MHA(layer_n)
+        self.attn = MQA(layer_n)
         self.rm_2 = RMSNorm(config['n_embd'])
         self.mlp = MLP()
 
         self.branch_scale = 1.0 / math.sqrt(config['n_layer']) # MuP residual rule a/root(L), a = 1.0 here
 
-    def forward(self, x):
-        x = x + self.branch_scale * self.attn(self.rm_1(x)) + self.branch_scale * self.mlp(self.rm_2(x)) # supposedly a small throughput boost post compile
+    def forward(self, x, start_pos=0, use_cache=False):
+        x = x + self.branch_scale * self.attn(self.rm_1(x), start_pos=start_pos, use_cache=use_cache)
+        x = x + self.branch_scale * self.mlp(self.rm_2(x))
         return x
 
 class Transformer(nn.Module):
@@ -217,11 +217,10 @@ class Transformer(nn.Module):
             h = nn.ModuleList([Block(layer_n=i) for i in range(config["n_layer"])]) 
         ))
 
+        # weight-tying was removed for performance purposes (literally useless at this scale from the looks of it)
+
         self.lm_head = nn.Linear(config['n_embd'], config['vocab_size'], bias=False)
-        self.h_scale = 1/config['n_embd'] # muP
-        
-        # weight-tying
-        self.lm_head.weight = self.transformer.wte.weight
+        self.h_scale = 1/config['n_embd'] # muP 
 
         # init all weights
         self.apply(self._init_weights)
@@ -247,12 +246,8 @@ class Transformer(nn.Module):
             # MuP for Embeddings, Constant variance std=0.02 is standard
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def _tag_layers(self, model):
-        for i, block in enumerate(self.transformer.h):
-            block.attn.layer_idx.fill_(i+1) # easy ratio check 
-            block.layer_idx = i+1  
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, start_pos=0, use_cache=False):
         
         device = idx.device
         b, t = idx.size()
@@ -264,7 +259,7 @@ class Transformer(nn.Module):
         x = self.transformer.drop(tok_emb)
         
         for block in self.transformer.h:
-            x = block(x)
+            x = block(x, start_pos=start_pos, use_cache=use_cache)
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
@@ -281,42 +276,51 @@ class Transformer(nn.Module):
 
         return logits, loss
 
-    @torch.no_grad() 
+    def reset_cache(self):
+        for block in self.transformer.h:
+            block.attn.k_cache.zero_()
+            block.attn.v_cache.zero_()
+
+    @torch.no_grad()
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
-        """
-        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
-        the sequence max_new_tokens times, feeding the predictions back into the model each time.
-        Most likely you'll want to make sure to be in model.eval() mode of operation for this.
-        """
-        for _ in range(max_new_tokens):
-            # if the sequence context is growing too long we must crop it at block_size
-            idx_cond = idx if idx.size(1) <= self.block_size else idx[:, -self.block_size:]
-            
-            # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond)
-            
-            # pluck the logits at the final step and scale by desired temperature
-            logits = logits[:, -1, :] 
-            logits = logits * self.h_scale 
-            logits = 30.0 * torch.tanh(logits / 30.0) # gemma softcap
-            logits = logits / temperature
-            
-            # optionally crop the logits to only the top k options
+        b, t = idx.size()
+    
+        # PREFILL PHASE, Process the entire prompt at once to populate the KV cache
+        logits, _ = self(idx, start_pos=0, use_cache=True)
+        logits = logits[:, -1, :] # We only care about the last logit for the first prediction
+    
+        # Simple sampling logic
+        logits = (logits * self.h_scale).tanh() * 30.0 / temperature # gemma softcap
+        if top_k is not None:
+            v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+            logits[logits < v[:, [-1]]] = -float('Inf')
+    
+        probs = F.softmax(logits, dim=-1)
+        idx_next = torch.multinomial(probs, num_samples=1)
+        idx = torch.cat((idx, idx_next), dim=1)
+    
+        # DECODING PHASE only pass the NEWEST token (idx_next) and its position
+        start_pos = t 
+    
+        for _ in range(max_new_tokens - 1):
+            # only pass the single last token [:, -1:]
+            logits, _ = self(idx[:, -1:], start_pos=start_pos, use_cache=True)
+        
+            logits = logits[:, -1, :]
+            logits = (logits * self.h_scale).tanh() * 30.0 / temperature
+        
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('Inf')
             
-            # apply softmax to convert logits to (normalized) probabilities
             probs = F.softmax(logits, dim=-1)
-            
-            # sample from the distribution
             idx_next = torch.multinomial(probs, num_samples=1)
-            
-            # append sampled index to the running sequence and continue
+        
             idx = torch.cat((idx, idx_next), dim=1)
-
+            start_pos += 1
+        
         return idx
-
+    
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
 
         # MuP, kept constant for Muon, didnt show much diff, maybe useful if you are extremely narrow
@@ -392,9 +396,9 @@ class Transformer(nn.Module):
         flops_per_token = 6 * N
         flops_per_iter = flops_per_token * total_tokens_per_iter
     
-        flops_promised = 65e12 # T4 number
+        flops_promised = 990e12 # bf16 h100 number, without 2:4 sparsity
         
-        flops_achieved = flops_per_iter / dt
+        flops_achieved = flops_per_iter / (dt * 4) # 4 gpu DDP
         mfu = flops_achieved / flops_promised
         tflops = flops_achieved / 1e12
         return mfu, tflops

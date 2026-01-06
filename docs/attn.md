@@ -5,7 +5,6 @@
 planned features:
 
  - KV sharing across global layers (from [MiMO flash](https://github.com/XiaomiMiMo/MiMo-V2-Flash/blob/main/paper.pdf)) 
- - MQA (from [one write head all you need](https://arxiv.org/pdf/1911.02150))
  - qwen-size ctx window (256k, extendable to 1M), most likely 128k or less during pre-train, midtrain yarn scale
  - fp8 (fully supported on hopper and blackwell, halves bandwidth and KV, doubles flops)
  - changing MQA into SSA by compressing the 1 k and 1 v into a KV latent fr every layer
@@ -14,8 +13,9 @@ planned features:
 
 completed:
 
- - 128 ctx SWA window (from [MiMO flash](https://github.com/XiaomiMiMo/MiMo-V2-Flash/blob/main/paper.pdf)) (still needs flex_attn)
+ - 128 ctx SWA window (from [MiMO flash](https://github.com/XiaomiMiMo/MiMo-V2-Flash/blob/main/paper.pdf))
  - hybrid ratios (from [noam shazeer char.ai research](https://web.archive.org/web/20250325023214/https://research.character.ai/optimizing-inference/))
+ - MQA (from [one write head all you need](https://arxiv.org/pdf/1911.02150))
 
 using flash attn mask, 
 
@@ -31,6 +31,8 @@ in an 8 head MHA, 5 global layers, 12 local layers fp16, 4096 ctx: `80mb + 6mb, 
 its already a 67% reduction
 
 with attn_sinks this should match all global
+
+with MQA and SWA I can fit 8192 tokens KV cache in 8.19mb, 7 layers, 2 global, hidden size is 256, total params 80M (qwen3 is pretty large)
 
 
 
