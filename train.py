@@ -3,6 +3,7 @@ import math
 import time
 import glob
 import torch
+import wandb
 import string
 import random
 import duckdb
@@ -23,13 +24,12 @@ from model import Transformer
 from datasets import load_dataset
 import torch._inductor.config as config
 
-# --- Optimizations ---
+# torch compil optims
 config.coordinate_descent_tuning = True
 config.triton.unique_kernel_names = True
 config.fx_graph_cache = True
 torch.set_float32_matmul_precision('high')
 
-# --- DDP Setup ---
 def setup_ddp():
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         dist.init_process_group(backend='nccl')
@@ -46,7 +46,8 @@ def setup_ddp():
 ddp_rank, ddp_local_rank, ddp_world_size, device = setup_ddp()
 master_process = ddp_rank == 0
 
-# --- TOML Config ---
+# toml
+
 parser = argparse.ArgumentParser(description="conf")
 parser.add_argument("--conf", type=str, default="", help="toml conf path")
 args = parser.parse_args()
@@ -54,7 +55,6 @@ args = parser.parse_args()
 with open(args.conf, "rb") as f:
     data = tomllib.load(f)
 
-# Unpack config
 batch_size = data["batch_size"] # Global batch size
 block_size = data["block_size"]
 eval_interval = data["eval_interval"]
@@ -68,12 +68,13 @@ weight_decay = data["weight_decay"]
 beta1, beta2 = 0.9, 0.95
 max_grad_norm = 1.0
 ckpt_iter = 500
-resume = False
-resume_checkpoint = "/content/floppyLLM/checkpoints/sVtcrs_10000.pt"
+resume = True
+resume_checkpoint = "checkpoints/qGi1Gr_19500.pt"
 data_dir = data["data_dir"]
 ptdtype = torch.bfloat16
 
-# --- Logging Setup (Rank 0 only) ---
+# wandb and duckdb
+
 run_name = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(6))
 if master_process:
     if not os.path.exists('checkpoints'): os.makedirs('checkpoints')
@@ -81,6 +82,13 @@ if master_process:
     logging = duckdb.connect("log.db")
     logging.sql(f"CREATE TABLE IF NOT EXISTS _{run_name} (step INT, lr FLOAT, train_loss FLOAT, val_loss FLOAT, train_pplx FLOAT, val_pplx FLOAT, val_bpb FLOAT, throughput FLOAT);")
     logging.close()
+
+    run = wandb.init(
+        entity="vatsadev",
+        project=f"reducto-1-{run_name}",
+    )
+
+    table = wandb.Table(columns=["step", "gen_text"])
 
 def safe_log_to_duckdb(run_name, row_data):
     if not master_process: return
@@ -90,13 +98,12 @@ def safe_log_to_duckdb(run_name, row_data):
     except Exception as e:
         print(f"DuckDB Error: {e}")
 
-# --- Data Loading ---
 def _load_data_shard(file: Path):
     with file.open("rb") as f:
         header_bytes = f.read(256 * 4)
         header = torch.frombuffer(header_bytes, dtype=torch.int32)
         num_tokens = int(header[2].item())
-        tokens = torch.empty(num_tokens, dtype=torch.uint16, pin_memory=True)
+        tokens = torch.empty(num_tokens, dtype=torch.int32, pin_memory=True)
         f.readinto(tokens.numpy().data)
     return tokens
 
@@ -125,7 +132,9 @@ val_gen = create_data_generator(os.path.join("data", data_dir, f"synth_text_val_
 
 # --- Tokenizer BPB Ratio ---
 tok = AutoTokenizer.from_pretrained(data["tokenizer"]) #"tokenizers/venti_4k"
-vocab_size = math.ceil(tok.vocab_size*128)//128
+true_vocab_size = len(tok) 
+vocab_size = ((true_vocab_size + 127) // 128) * 128
+
 if master_process:
     # Estimate tokens_per_byte for BPB metrics
     sample_text = "The quick brown fox jumps over the lazy dog. Just some text to estimate byte density."
@@ -143,12 +152,12 @@ model.config.update({
 model_instance = Transformer().to(device)
 if resume:
     checkpoint = torch.load(resume_checkpoint, map_location=device)
-    model_instance.load_state_dict({k.replace('_orig_mod.', ''): v for k, v in checkpoint['model'].items()})
+    model_instance.load_state_dict({k.replace('_orig_mod.', ''): v for k, v in checkpoint['model'].items()}, strict=False)
     start_iter = checkpoint['iter'] + 1
 else:
     start_iter = 0
 
-m = DDP(model_instance, device_ids=[ddp_local_rank])
+m = DDP(model_instance, device_ids=[ddp_local_rank], find_unused_parameters=True)
 raw_model = m.module
 opt_muon, opt_adam = raw_model.configure_optimizers(weight_decay, lr, (beta1, beta2), device_type='cuda')
 compiled_model = torch.compile(m)
@@ -183,6 +192,12 @@ if master_process:
     print(f"H100 Node Initialized. World Size: {ddp_world_size}")
     print(f"Params: {sum(p.numel() for p in m.parameters() if p.requires_grad)/1e6:.2f}M")
 
+    total_params = sum(p.numel() for p in m.parameters())
+    trainable_params = sum(p.numel() for p in m.parameters() if p.requires_grad)
+
+    print(f"Total Params: {total_params/1e6:.2f}M")
+    print(f"Trainable Params: {trainable_params/1e6:.2f}M") # This will be the ~LM size
+
 for iter_num in range(start_iter, max_iters + 1):
     
     # 1. Cosine LR
@@ -201,6 +216,7 @@ for iter_num in range(start_iter, max_iters + 1):
         losses = estimate_loss()
         
         if master_process:
+
             time_n = time.time()
             elapsed = time_n - time_s
             dt = time_n - prev_time
@@ -224,10 +240,37 @@ for iter_num in range(start_iter, max_iters + 1):
                   f"pplx: {val_ppl:.2f} | lr: {lr_iter:.6f} | dt: {dt:.2f}s | "
                   f"tok/s: {throughput:.0f} | TFLOPS: {tflops:.2f} | MFU: {mfu*100:.1f}%")
 
+            # wandb log step
+
+            run.log({"train_loss": train_loss, "val_loss": val_loss, "train_ppl": train_ppl, "val_ppl": val_ppl})
+
             # DuckDB
             row = f"({iter_num},{lr_iter},{train_loss:.4f},{val_loss:.4f},{train_ppl:.4f},{val_ppl:.4f},{val_bpb:.4f},{throughput:.2f})"
             safe_log_to_duckdb(run_name, row)
             subprocess.Popen(["python", "plotgen.py", f"_{run_name}"])
+
+    if iter_num % 100 == 0:
+
+        if master_process:
+
+            # output prints
+            model_instance.eval()
+            context_tokens = torch.tensor([[198]], dtype=torch.long, device=device) # sources say 198 is newline, verify later
+            raw_model.reset_cache()
+
+            with torch.no_grad():
+                with ctx:
+                    y = raw_model.generate(context_tokens, max_new_tokens=500, temperature=0.8, top_k=50)
+            
+            decoded_text = tok.decode(y[0].tolist())
+            print(f"\n{'='*20} output at step {iter_num} {'='*20}\n{decoded_text}\n{'='*20}\n")
+           
+            sample_table = wandb.Table(columns=["step", "generation"])
+            sample_table.add_data(iter_num, decoded_text)
+            run.log({"samples": sample_table})
+
+            raw_model.reset_cache()
+            model_instance.train() 
 
     if iter_num == max_iters: break
 

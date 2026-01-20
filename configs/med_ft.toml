@@ -1,0 +1,21 @@
+n_embd = 512
+n_layer = 16
+n_head = 4
+
+batch_size = 40
+block_size = 4096
+eval_interval = 20
+grad_accum_steps = 10
+
+lr = 1e-4 # little less than half the pretrain lr for FT
+min_lr = 1e-5
+max_iters = 25020
+eval_iters = 20
+warmup_iters = 500
+
+dropout = 0.0
+weight_decay = 0.1
+
+swa_ratio = 1
+data_dir = "vision_binned"
+tokenizer = "Qwen/Qwen3-1.7B"

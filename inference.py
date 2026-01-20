@@ -65,7 +65,7 @@ with open(args.conf, "rb") as f:
     data = tomllib.load(f)
 
 tokenizer = AutoTokenizer.from_pretrained(data["tokenizer"])
-vocab_size = tokenizer.vocab_size
+vocab_size = 151680
 
 device = "cuda"
 ptdtype = torch.bfloat16
@@ -129,8 +129,8 @@ with torch.inference_mode():
         generated_indices = m.generate(
             idx, 
             max_new_tokens=args.new_tokens, 
-            temperature=0.2, 
-            top_k=10
+            temperature=0.01, 
+            top_k=5
         )
 
 t1 = time.perf_counter()

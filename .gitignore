@@ -1,7 +1,9 @@
 synth/
 synth_text/
 qwen_text/
-venv/
+vision_binned/
+wandb/
+.venv/
 __pycache__/
 plots/
 checkpoints/
